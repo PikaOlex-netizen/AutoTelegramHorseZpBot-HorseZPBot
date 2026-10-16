@@ -1,5 +1,4 @@
-[README.md](https://github.com/user-attachments/files/33544566/README.md)
-# AutoTelegramHorseZpBot-HorseZPBot# Telegram Scheduler / Auto-Poster
+# Telegram Scheduler / Auto-Poster
 
 Полноценное локальное web-приложение для Windows, Linux и macOS, которое управляет пользовательским Telegram-аккаунтом через Telethon. Список чатов загружается из Telegram, а назначения для ПЧ и ПБ вы выбираете сами.
 
