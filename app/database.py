@@ -19,11 +19,11 @@ class Database:
         self._migrate_legacy_schema()
 
     def _migrate_legacy_schema(self) -> None:
-        """Small SQLite migrations for installations created before multi-account.
+        """Невеликі міграції SQLite для інсталяцій, створених до multi-account.
 
-        SQLAlchemy's create_all creates tables but cannot add columns or replace a
-        primary key. Existing chats are copied into a per-account table and
-        assigned to Account 1, preserving all user data and delivery history.
+        SQLAlchemy's create_all створює таблиці, але не може додавати стовпці або замінити
+        первинний ключ. Існуючі чати копіюються в таблицю для кожного акаунту і
+        призначаються до Account 1, зберігаючи всі дані користувача та історію доставки.
         """
         with self.engine.begin() as connection:
             columns = {row[1] for row in connection.exec_driver_sql("PRAGMA table_info(chats)").fetchall()}
@@ -64,7 +64,7 @@ class Database:
                 if chat_columns and "keyword_reply_enabled" not in chat_columns:
                     connection.exec_driver_sql("ALTER TABLE chats ADD COLUMN keyword_reply_enabled BOOLEAN NOT NULL DEFAULT 0")
             if "bot_username" in {row[1] for row in connection.exec_driver_sql("PRAGMA table_info(chats)").fetchall()}:
-                # This legacy metadata is no longer used by the application.
+                # Ці застарілі метадані більше не використовуються застосунком.
                 connection.exec_driver_sql("UPDATE chats SET bot_username = 'legacy'")
             outbound_columns = {row[1] for row in connection.exec_driver_sql("PRAGMA table_info(outbound_messages)").fetchall()}
             if outbound_columns and "account_id" not in outbound_columns:
@@ -85,7 +85,7 @@ class Database:
                         "UPDATE scheduler_states SET mailing_type = ? WHERE mailing_type = ?",
                         (f"1:{mailing_type}", mailing_type),
                     )
-            # Add global keyword reply state table if it doesn't exist
+            # Додати таблицю глобального стану відповіді на ключові слова, якщо вона не існує
             global_state_tables = {row[0] for row in connection.exec_driver_sql("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
             if "keyword_reply_global_state" not in global_state_tables:
                 connection.exec_driver_sql("""
@@ -96,6 +96,34 @@ class Database:
                     )
                 """)
                 connection.exec_driver_sql("INSERT INTO keyword_reply_global_state (id, last_sent_at, updated_at) VALUES (1, NULL, ?)", (datetime.now(timezone.utc).isoformat(),))
+            # Додати таблиці для функції 'Нагодувати гівном', якщо вони не існують
+            all_tables = {row[0] for row in connection.exec_driver_sql("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+            if "user_cooldowns" not in all_tables:
+                connection.exec_driver_sql("""
+                    CREATE TABLE user_cooldowns (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        account_id INTEGER NOT NULL,
+                        user_id INTEGER NOT NULL,
+                        username TEXT,
+                        last_fed_at DATETIME,
+                        updated_at DATETIME,
+                        UNIQUE(account_id, user_id)
+                    )
+                """)
+                connection.exec_driver_sql("CREATE INDEX IF NOT EXISTS ix_user_cooldowns_account_id ON user_cooldowns (account_id)")
+                connection.exec_driver_sql("CREATE INDEX IF NOT EXISTS ix_user_cooldowns_user_id ON user_cooldowns (user_id)")
+            if "feed_states" not in all_tables:
+                connection.exec_driver_sql("""
+                    CREATE TABLE feed_states (
+                        account_id INTEGER PRIMARY KEY,
+                        enabled BOOLEAN NOT NULL DEFAULT 0,
+                        username_to_feed TEXT,
+                        message_text TEXT,
+                        status VARCHAR(32) NOT NULL DEFAULT 'IDLE',
+                        updated_at DATETIME
+                    )
+                """)
+                connection.exec_driver_sql("CREATE INDEX IF NOT EXISTS ix_feed_states_status ON feed_states (status)")
 
     @contextmanager
     def session(self):

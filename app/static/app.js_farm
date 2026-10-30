@@ -1,0 +1,15 @@
+async function renderFarm() {
+  const [farm,chats]=await Promise.all([api('/api/farm'),api('/api/chats')]);
+  const options=chats.map(c=>`<option value="${c.chat_id}" ${farm.chat_id===c.chat_id?'selected':''}>${escapeHtml(c.title)} (${c.chat_id})</option>`).join('');
+  const farmTypes=[
+    {value:'pure',label:'Чисто ферма'},
+    {value:'silver',label:'Ферма silver'},
+    {value:'gold',label:'Ферма золото'},
+    {value:'hay',label:'Ферма гайки'}
+  ];
+  const farmTypeOptions=farmTypes.map(t=>`<option value="${t.value}" ${farm.farm_type===t.value?'selected':''}>${t.label}</option>`).join('');
+  const intervalOptions=[23,71,119,167,335,559].map(h=>`<option value="${h}" ${farm.interval_hours===h?'selected':''}>${h} годин</option>`).join('');
+  setContent(`<div class="grid two"><article class="card stack"><div class="card-title-row"><h3 class="card-title">Ферма</h3>${chip(farm.status)}</div><p class="notice">Повідомлення надсилається в один обраний чат. Текст завжди "ферма рестарт". Повідомлення Ферми не видаляються автоматично. Налаштування зберігаються та відновлюються після перезапуску.</p><form id="farm-form" class="stack"><div class="field"><label>Чат призначення</label><select name="chat_id" required><option value="">Оберіть чат</option>${options}</select></div><div class="field"><label>Тип ферми</label><select name="farm_type">${farmTypeOptions}</select></div><div class="field"><label>Інтервал</label><select name="interval_hours">${intervalOptions}</select></div><div class="field"><label>Стан</label><select name="enabled"><option value="true" ${farm.enabled?'selected':''}>Увімкнено</option><option value="false" ${!farm.enabled?'selected':''}>Вимкнено</option></select></div><div class="form-actions">${button('Зберегти','save-farm','primary')}</div></form></article><article class="card stack"><h3 class="card-title">Стан</h3><dl class="kv"><dt>Наступне надсилання</dt><dd>${date(farm.next_send_at)}</dd><dt>Останнє надсилання</dt><dd>${date(farm.last_sent_at)}</dd><dt>Інтервал</dt><dd>${farm.interval_text}</dd><dt>Видалення</dt><dd>Вимкнено</dd></dl>${farm.last_error?`<div class="notice warn">Остання помилка: ${escapeHtml(farm.last_error)}. Наступну спробу буде виконано автоматично.</div>`:''}</article></div>`);
+  const form=$('#farm-form');
+  form.addEventListener('submit',async event=>{event.preventDefault();const data=Object.fromEntries(new FormData(event.currentTarget));data.chat_id=data.chat_id?Number(data.chat_id):null;data.enabled=data.enabled==='true';data.interval_hours=Number(data.interval_hours);try{await api('/api/farm',{method:'PUT',body:JSON.stringify(data)});toast(data.enabled?'Ферму ввімкнено.':'Ферму зупинено.','success');renderPage()}catch(e){toast(e.message,'error')});
+}

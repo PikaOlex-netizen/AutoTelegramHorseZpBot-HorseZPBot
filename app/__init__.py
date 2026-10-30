@@ -1,2 +1,2 @@
-"""Telegram Scheduler / Auto-Poster application package."""
+"""Пакет застосунку Telegram Scheduler / Auto-Poster."""
 

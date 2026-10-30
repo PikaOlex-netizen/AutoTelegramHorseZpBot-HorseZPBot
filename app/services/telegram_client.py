@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import base64
-from io import BytesIO
+import re
 from collections.abc import Awaitable, Callable
+from io import BytesIO
 from typing import Any
 
 import qrcode
@@ -29,6 +30,7 @@ class TelegramService:
         self.audit = audit
         self.settings = settings
         self.accounts = accounts
+        self.messages = None
         self.clients: dict[int, TelegramClient] = {}
         self._lock = asyncio.Lock()
         self._phone: dict[int, str] = {}
@@ -37,6 +39,7 @@ class TelegramService:
         self._qr_waiter: dict[int, asyncio.Task[None]] = {}
         self.qr_state: dict[int, str] = {}
         self._authorized_callbacks: list[Callable[[int], Awaitable[None]]] = []
+        self._event_handlers: list[tuple[Callable, Any]] = []
 
     def add_authorized_callback(self, callback: Callable[[int], Awaitable[None]]) -> None:
         """Attach incoming-message handlers immediately after any login method."""
@@ -47,8 +50,8 @@ class TelegramService:
             try:
                 await callback(account_id)
             except Exception as exc:
-                # A responder failing to attach must never invalidate a valid
-                # Telegram session or make the login look unsuccessful.
+                # Відповідач, що не зміг прикріпитися, ніколи не повинен анулювати дійсну
+                # сесію Telegram або робити вхід невдалим.
                 self.audit.write(
                     "ERROR", "telegram", "authorized_callback_failed",
                     f"Post-login listener setup failed: {type(exc).__name__}", account_id=account_id,
@@ -59,7 +62,7 @@ class TelegramService:
             raise TelegramUnavailable("API_ID and API_HASH must be configured in .env before Telegram can connect")
 
     def _session_path(self, account_id: int) -> str:
-        # Preserve the original single-account session as Account 1 on upgrade.
+        # Зберегти оригінальну сесію одиночного акаунту як Акаунт 1 при оновленні.
         if account_id == 1:
             return self.config.telegram_session_path
         return str(self.config.data_dir / f"telegram-account-{account_id}.session")
@@ -74,9 +77,12 @@ class TelegramService:
         client = self.clients.get(account_id)
         if client is None:
             auto_reconnect = bool(self.settings.get("auto_reconnect")) if self.settings else self.config.auto_reconnect
+            all_settings = self.settings.get_all() if self.settings else {}
+            device_model = all_settings.get("telegram_device_model", self.config.telegram_device_model)
             client = TelegramClient(
                 self._session_path(account_id), self.config.api_id, self.config.api_hash,
                 auto_reconnect=auto_reconnect, connection_retries=5, retry_delay=2,
+                device_model=device_model,
             )
             self.clients[account_id] = client
         if not client.is_connected():
@@ -211,7 +217,7 @@ class TelegramService:
                 continue
             title = dialog.name or utils.get_display_name(entity) or str(getattr(entity, "id", ""))
             dialogs.append({
-                # Use Telegram's signed peer id, not the raw per-type id.
+                # Використовувати підписаний peer id Telegram, а не сирі id для кожного типу.
                 "chat_id": int(utils.get_peer_id(entity)), "title": title, "username": getattr(entity, "username", None),
                 "chat_type": "supergroup",
             })
@@ -228,7 +234,7 @@ class TelegramService:
         client = await self.require_authorized(account_id)
         entity = await client.get_input_entity(chat_id)
         message = await client.get_messages(entity, ids=message_id)
-        # MessageEmpty and None both mean Telegram no longer exposes the message.
+        # MessageEmpty та None обидва означають, що Telegram більше не відкриває повідомлення.
         return bool(message and getattr(message, "id", None))
 
     async def delete_message(self, account_id: int, chat_id: int, message_id: int) -> None:
@@ -242,3 +248,20 @@ class TelegramService:
                 await client.disconnect()
                 self.audit.write("INFO", "telegram", "disconnected", "Telegram connection closed", account_id=account_id)
         self.clients.clear()
+
+    def add_event_handler(self, handler: Callable, event_filter=None) -> None:
+        """Register a centralized event handler to be attached to all clients."""
+        self._event_handlers.append((handler, event_filter))
+
+    async def start_listeners(self) -> None:
+        """Attach registered handlers to all connected clients."""
+        for account_id, client in self.clients.items():
+            for handler, event_filter in self._event_handlers:
+                async def wrapped_handler(event: Any, aid: int = account_id, h: Callable = handler) -> None:
+                    event._account_id = aid
+                    await h(event)
+                if event_filter:
+                    client.add_event_handler(wrapped_handler, event_filter)
+                else:
+                    client.add_event_handler(wrapped_handler)
+            self.audit.write("INFO", "telegram", "listeners_started", "Event handlers attached", account_id=account_id)

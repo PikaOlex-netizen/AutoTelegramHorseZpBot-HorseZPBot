@@ -1,24 +1,24 @@
-# Configuration
+# Конфігурація
 
-Copy `.env.example` to `.env`. Do not commit the resulting file.
+Скопіюйте `.env.example` в `.env`. Не комітьте отриманий файл.
 
-| Variable | Default | Meaning |
+| Змінна | За замовчуванням | Значення |
 |---|---:|---|
-| `API_ID` | — | Telegram application id from my.telegram.org |
-| `API_HASH` | — | Telegram application secret |
-| `DELETE_AFTER_SECONDS` | `60` | Initial delay before a PCH/PB/manual outbound message is checked and deleted (Farm and Gemini are never deleted) |
-| `MAX_DELETE_RETRIES` | `3` | Maximum temporary delete retries; further failure is `FAILED` |
-| `PCH_GROUPS` | `6` | Initial number of PЧ groups |
-| `PB_GROUPS` | `12` | Initial number of ПБ groups |
-| `GROUP_DELAY_SECONDS` | `3600` | Initial delay between groups, not individual messages |
-| `LOG_LEVEL` | `INFO` | Initial audit level preference |
-| `AUTO_RECONNECT` | `true` | Initial Telethon auto-reconnect preference |
-| `HOST` | `127.0.0.1` | Local bind address |
-| `PORT` | `8000` | Local HTTP port |
-| `GEMINI_API_KEY` | — | Optional Gemini API key; read only from `.env`, never from the UI or database |
-| `GEMINI_MODEL` | `gemini-flash-lite-latest` | Default model for newly configured account assistants |
-| `TERMINAL_IDLE_REPORT_SECONDS` | `60` | Seconds between terminal reports while no send/delete action is in progress |
+| `API_ID` | — | id застосунку Telegram з my.telegram.org |
+| `API_HASH` | — | секрет застосунку Telegram |
+| `DELETE_AFTER_SECONDS` | `60` | Початкова затримка перед перевіркою та видаленням вихідного повідомлення ПЧ/ПБ/ручного (Ферма та Gemini ніколи не видаляються) |
+| `MAX_DELETE_RETRIES` | `3` | Максимальна кількість тимчасових повторів видалення; подальша невдача — `FAILED` |
+| `PCH_GROUPS` | `6` | Початкова кількість груп ПЧ |
+| `PB_GROUPS` | `12` | Початкова кількість груп ПБ |
+| `GROUP_DELAY_SECONDS` | `3600` | Початкова затримка між групами, а не окремими повідомленнями |
+| `LOG_LEVEL` | `INFO` | Початкове перевагу рівня аудиту |
+| `AUTO_RECONNECT` | `true` | Початкова перевага автоперепідключення Telethon |
+| `HOST` | `127.0.0.1` | Локальна адреса прив'язки |
+| `PORT` | `8000` | Локальний HTTP порт |
+| `GEMINI_API_KEY` | — | Опціональний ключ API Gemini; читається лише з `.env`, ніколи з UI або бази даних |
+| `GEMINI_MODEL` | `gemini-flash-lite-latest` | Модель за замовчуванням для нових налаштованих асистентів акаунтів |
+| `TERMINAL_IDLE_REPORT_SECONDS` | `60` | Секунди між звітами терміналу, поки не виконується дія відправки/видалення |
 
-The settings page writes its values to SQLite so changes persist across restarts. Environment values seed the database only when the setting is absent. Group-count and delay changes affect the next new run; an already snapshotted run remains stable.
+Сторінка налаштувань записує свої значення в SQLite, тому зміни зберігаються між перезапусками. Значення змінних середовища ініціалізують базу даних лише тоді, коли налаштування відсутнє. Зміни кількості груп та затримки впливають на наступний новий запуск; вже знятий запуск залишається стабільним.
 
-Never enter `API_HASH`, `GEMINI_API_KEY`, SMS/login codes, a 2FA password or the contents of `data/telegram*.session` into logs, tickets or source control.
+Ніколи не вводіть `API_HASH`, `GEMINI_API_KEY`, SMS/код входу, пароль 2FA або вміст `data/telegram*.session` в журнали, тикети або систему контролю версій.

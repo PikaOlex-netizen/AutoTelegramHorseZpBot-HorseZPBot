@@ -32,7 +32,7 @@ def log_to_dict(log: LogEntry) -> dict[str, Any]:
 
 
 class AuditLog:
-    """Persistent audit log with a small in-process SSE fan-out."""
+    """Стійкий журнал аудиту з невеликим SSE fan-out в процесі."""
 
     def __init__(self, db: Database, settings: SettingsService | None = None) -> None:
         self.db = db
@@ -51,7 +51,7 @@ class AuditLog:
         chat_id: int | None = None,
         message_id: int | None = None,
     ) -> dict[str, Any]:
-        # Secrets are intentionally never accepted by this public logging API.
+        # Секрети навмисно ніколи не приймаються цим публічним API логування.
         configured_level = str(self.settings.get("log_level")) if self.settings else "INFO"
         ranks = {"DEBUG": 10, "INFO": 20, "WARNING": 30, "ERROR": 40, "CRITICAL": 50}
         if ranks.get(level.upper(), 20) < ranks.get(configured_level.upper(), 20):

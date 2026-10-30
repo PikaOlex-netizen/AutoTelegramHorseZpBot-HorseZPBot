@@ -42,7 +42,7 @@ class TemplateRequest(BaseModel):
 
 class FarmSettingsRequest(BaseModel):
     chat_id: int | None = None
-    text: str | None = Field(default=None, max_length=4096)
+    interval_hours: int = Field(default=23, ge=0)
     enabled: bool
 
 
@@ -52,10 +52,16 @@ class PSSettingsRequest(BaseModel):
     enabled: bool
 
 
+class FeedSettingsRequest(BaseModel):
+    username_to_feed: str | None = Field(default=None, max_length=128)
+    text: str | None = Field(default=None, max_length=4096)
+    enabled: bool
+
+
 class ManualMessageRequest(BaseModel):
     chat_id: int
     text: str = Field(min_length=1, max_length=4096)
-    message_type: str = Field(pattern="^(PCH|PB|PS)$")
+    message_type: str = Field(pattern="^(PCH|PB|PS|FARM|REPLY)$")
 
 
 class SettingsRequest(BaseModel):
@@ -64,6 +70,8 @@ class SettingsRequest(BaseModel):
     pch_groups: int = Field(ge=1, le=100)
     pb_groups: int = Field(ge=1, le=100)
     group_delay_seconds: int = Field(ge=1, le=604800)
+    pch_pb_delay_seconds: int = Field(ge=0, le=3600, default=0)
+    telegram_device_model: str = Field(min_length=1, max_length=100)
     log_level: str = Field(pattern="^(DEBUG|INFO|WARNING|ERROR|CRITICAL)$")
     auto_reconnect: bool
     theme: str = Field(pattern="^(dark|light)$")
@@ -72,7 +80,18 @@ class SettingsRequest(BaseModel):
 class GeminiSettingsRequest(BaseModel):
     enabled: bool
     model: str = Field(min_length=1, max_length=120)
-    system_prompt: str = Field(min_length=1, max_length=4000)
+    system_prompt: str = Field(min_length=1, max_length=10000)
+
+
+class BotResponseItem(BaseModel):
+    id: int
+    chat_id: int
+    chat_title: str
+    bot_username: str
+    bot_message_id: int
+    pch_message_id: int | None
+    response_text: str
+    received_at: str
 
 
 class ChatResponse(BaseModel):

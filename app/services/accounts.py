@@ -59,31 +59,31 @@ class AccountService:
             return selected
         accounts = self.list()
         if not accounts:
-            raise RuntimeError("No active Telegram accounts")
+            raise RuntimeError("Немає активних Telegram акаунтів")
         self.settings.update({SELECTED_ACCOUNT_KEY: accounts[0]["id"]})
         return accounts[0]["id"]
 
     def select(self, account_id: int) -> dict[str, Any]:
         account = self.get(account_id)
         if account is None:
-            raise KeyError(f"Account {account_id} does not exist")
+            raise KeyError(f"Акаунт {account_id} не існує")
         self.settings.update({SELECTED_ACCOUNT_KEY: account_id})
-        self.audit.write("INFO", "accounts", "selected", f"Selected {account['label']}", account_id=account_id)
+        self.audit.write("INFO", "accounts", "selected", f"Вибрано {account['label']}", account_id=account_id)
         return account
 
     def create(self, label: str) -> dict[str, Any]:
-        clean = label.strip() or f"Аккаунт {len(self.list()) + 1}"
+        clean = label.strip() or f"Акаунт {len(self.list()) + 1}"
         if len(clean) > 80:
-            raise ValueError("Account name must be 80 characters or fewer")
+            raise ValueError("Назва акаунту має бути 80 символів або менше")
         with self.db.session() as session:
             active_count = session.scalar(select(func.count(TelegramAccount.id)).where(TelegramAccount.active.is_(True)))
             if active_count >= MAX_ACCOUNTS:
-                raise ValueError("A maximum of three Telegram accounts is supported")
+                raise ValueError("Підтримується максимум три Telegram акаунти")
             account = TelegramAccount(label=clean)
             session.add(account)
             session.flush()
             result = account_to_dict(account)
-        self.audit.write("INFO", "accounts", "created", f"Created {clean}", account_id=result["id"])
+        self.audit.write("INFO", "accounts", "created", f"Створено {clean}", account_id=result["id"])
         return result
 
     def set_phone(self, account_id: int, phone: str) -> None:
@@ -93,16 +93,16 @@ class AccountService:
                 account.phone = phone
 
     def rename(self, account_id: int, new_label: str) -> dict[str, Any]:
-        clean = new_label.strip() or f"Аккаунт {account_id}"
+        clean = new_label.strip() or f"Акаунт {account_id}"
         if len(clean) > 80:
-            raise ValueError("Account name must be 80 characters or fewer")
+            raise ValueError("Назва акаунту має бути 80 символів або менше")
         with self.db.session() as session:
             account = session.get(TelegramAccount, account_id)
             if account is None or not account.active:
-                raise KeyError(f"Account {account_id} does not exist")
+                raise KeyError(f"Акаунт {account_id} не існує")
             old_label = account.label
             account.label = clean
             result = account_to_dict(account)
-        self.audit.write("INFO", "accounts", "renamed", f"Renamed from {old_label} to {clean}", account_id=account_id)
+        self.audit.write("INFO", "accounts", "renamed", f"Перейменовано з {old_label} на {clean}", account_id=account_id)
         return result
 

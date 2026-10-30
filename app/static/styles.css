@@ -644,6 +644,13 @@ textarea {
   text-align: center;
 }
 
+.logline .log-time {
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  min-width: 132px;
+}
+
 .logline .level.DEBUG {
   background: var(--bg-surface-2);
   color: var(--text-muted);
@@ -873,6 +880,7 @@ textarea {
   background: var(--bg-surface);
   color: var(--text-primary);
   box-shadow: var(--shadow-card);
+  margin: auto;
 }
 
 .modal::backdrop {
@@ -887,6 +895,10 @@ textarea {
 .modal h3 {
   margin: 0 0 var(--spacing-sm);
   font-size: 18px;
+}
+
+dialog {
+  margin: auto;
 }
 
 .modal p {
@@ -1235,10 +1247,54 @@ textarea {
   gap: var(--spacing-xs);
 }
 
+.group.clickable {
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.group.clickable:hover {
+  background: rgba(0, 240, 255, 0.15);
+  border-color: rgba(0, 240, 255, 0.4);
+}
+
 .group b {
   color: var(--accent-primary);
   font-weight: 700;
   margin-left: var(--spacing-xs);
+}
+
+.group-chat-list {
+  max-height: 400px;
+  overflow-y: auto;
+  margin: var(--spacing-md) 0;
+  padding: var(--spacing-sm);
+  background: var(--surface-2);
+  border-radius: var(--radius-sm);
+}
+
+.group-chat-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: var(--spacing-sm);
+  background: var(--surface-1);
+  border-radius: var(--radius-sm);
+  margin-bottom: var(--spacing-xs);
+  font-size: 13px;
+}
+
+.group-chat-item:last-child {
+  margin-bottom: 0;
+}
+
+.group-chat-item .chat-name {
+  font-weight: 500;
+  color: var(--text-primary);
+}
+
+.group-chat-item .mono {
+  color: var(--text-muted);
+  font-size: 11px;
 }
 
 /* QR Code */
@@ -1408,52 +1464,6 @@ textarea {
   max-width: 600px;
   margin-left: auto;
   margin-right: auto;
-}
-
-.hero-horse-container {
-  position: relative;
-  width: 400px;
-  height: 300px;
-  margin: var(--spacing-xl) auto;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-
-.neon-horse {
-  font-size: 200px;
-  filter: drop-shadow(0 0 30px rgba(0, 240, 255, 0.8))
-          drop-shadow(0 0 60px rgba(255, 0, 255, 0.6))
-          drop-shadow(0 0 90px rgba(178, 75, 255, 0.4));
-  animation: horseFloat 4s ease-in-out infinite;
-}
-
-@keyframes horseFloat {
-  0%, 100% {
-    transform: translateY(0) scale(1);
-  }
-  50% {
-    transform: translateY(-15px) scale(1.05);
-  }
-}
-
-.hero-grid {
-  position: absolute;
-  inset: 0;
-  background-image: 
-    linear-gradient(rgba(0, 240, 255, 0.03) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(0, 240, 255, 0.03) 1px, transparent 1px);
-  background-size: 50px 50px;
-  animation: gridMove 20s linear infinite;
-}
-
-@keyframes gridMove {
-  0% {
-    transform: perspective(500px) rotateX(60deg) translateY(0);
-  }
-  100% {
-    transform: perspective(500px) rotateX(60deg) translateY(50px);
-  }
 }
 
 .hero-particles {

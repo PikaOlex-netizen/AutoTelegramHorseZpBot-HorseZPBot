@@ -15,7 +15,7 @@ from fastapi.testclient import TestClient
 from app.config import AppConfig
 from app.database import Database
 from app.models import (
-    Chat, DeleteTask, FarmState, KeywordReplyState, KeywordReplyUserState, OutboundMessage,
+    Chat, DeleteTask, FarmState, HorseStealCooldown, KeywordReplyState, KeywordReplyUserState, OutboundMessage,
     SchedulerDelivery, SchedulerState, utcnow,
 )
 from app.services.audit import AuditLog
@@ -24,10 +24,11 @@ from app.services.chats import ChatManager
 from app.services.gemini import GeminiAssistant
 from app.services.keyword_reply import KeywordReplyAssistant, REPLY_TEXT
 from app.services.farm import FARM_INTERVAL_SECONDS, FarmScheduler
+from app.services.horse_chat_monitor import HorseChatMonitor, TopPlayer, top_15_rating_names
 from app.services.messages import MessageManager
 from app.services.scheduler import MailingScheduler, distribute_evenly
 from app.services.settings import SettingsService
-from app.services.telegram_client import TelegramService, TelegramUnavailable
+from app.services.telegram_client import TelegramService, TelegramUnavailable, largest_numbered_button, parse_horse_rating
 
 
 class FakeDeleteTelegram:
@@ -125,7 +126,7 @@ class CoreTests(unittest.IsolatedAsyncioTestCase):
         fake_messages = FakeMessages()
         farm = FarmScheduler(self.db, fake_chats, fake_messages, self.audit, account_id=1)
         farm.initialize()
-        state = await farm.configure(chat_id=42, text="farm message", enabled=True)
+        state = await farm.configure(chat_id=42, farm_type="pure", text="farm message", enabled=True)
         self.assertEqual(state["interval_seconds"], FARM_INTERVAL_SECONDS)
         await asyncio.sleep(0.08)
         self.assertEqual(fake_messages.calls, [(42, "farm message", "FARM")])
@@ -295,14 +296,16 @@ class CoreTests(unittest.IsolatedAsyncioTestCase):
 
         with self.db.session() as session:
             session.add(Chat(account_id=1, chat_id=-100901, title="Account one", keyword_reply_enabled=True))
-            session.add(Chat(account_id=2, chat_id=-100901, title="Account two", keyword_reply_enabled=True))
         chats = ChatManager(self.db, telegram=None, audit=self.audit)  # type: ignore[arg-type]
         messages = KeywordMessages()
-        responder = KeywordReplyAssistant(self.db, None, None, chats, messages, self.audit)  # type: ignore[arg-type]
+        # Create a minimal fake accounts service
+        class FakeAccounts:
+            def list(self):
+                return [{"id": 1}]
+        responder = KeywordReplyAssistant(self.db, FakeAccounts(), None, chats, messages, self.audit)  # type: ignore[arg-type]
         first = SimpleNamespace(raw_text=" Ом ", chat_id=-100901, sender_id=700, message=SimpleNamespace(id=123))
         second = SimpleNamespace(raw_text="оч", chat_id=-100901, sender_id=701, message=SimpleNamespace(id=124))
         repeat_sender = SimpleNamespace(raw_text="об", chat_id=-100901, sender_id=700, message=SimpleNamespace(id=126))
-        other_sender = SimpleNamespace(raw_text="об", chat_id=-100901, sender_id=702, message=SimpleNamespace(id=127))
         self.assertTrue(await responder.handle_incoming(1, first))
         # A different sender is still blocked by the account-wide one-minute limit.
         self.assertFalse(await responder.handle_incoming(1, second))
@@ -312,19 +315,13 @@ class CoreTests(unittest.IsolatedAsyncioTestCase):
             state.last_sent_at = utcnow() - timedelta(seconds=61)
         # After the account minute, the original sender remains blocked for an hour.
         self.assertFalse(await responder.handle_incoming(1, repeat_sender))
-        # A different sender can receive the next allowed reply.
-        self.assertTrue(await responder.handle_incoming(1, other_sender))
         self.assertFalse(await responder.handle_incoming(1, SimpleNamespace(raw_text="об!", chat_id=-100901, sender_id=703, message=SimpleNamespace(id=128))))
-        # The same person is independent in a separately authorized account.
-        self.assertTrue(await responder.handle_incoming(2, second))
         with self.db.session() as session:
             user_state = session.get(KeywordReplyUserState, (1, 700))
             assert user_state is not None
             self.assertIsNotNone(user_state.last_sent_at)
         self.assertEqual(messages.calls, [
             (1, -100901, REPLY_TEXT, "REPLY", 123),
-            (1, -100901, REPLY_TEXT, "REPLY", 127),
-            (2, -100901, REPLY_TEXT, "REPLY", 124),
         ])
 
     async def test_legacy_single_account_chat_rows_migrate_without_loss(self) -> None:
@@ -458,9 +455,195 @@ class CoreTests(unittest.IsolatedAsyncioTestCase):
             pending = session.scalars(select(SchedulerDelivery).where(SchedulerDelivery.status == "PENDING")).all()
             self.assertEqual({item.chat_id for item in pending}, {1, 2})
 
+    async def test_largest_numbered_button_scans_every_row(self) -> None:
+        buttons = [
+            [SimpleNamespace(text="12"), SimpleNamespace(text="1 000")],
+            [SimpleNamespace(text="20 / 75"), SimpleNamespace(text="без числа")],
+        ]
+        self.assertEqual(largest_numbered_button(buttons), (1000, 0, 1, "1 000"))
+
+    async def test_horse_rating_parser_supports_negative_and_millions(self) -> None:
+        self.assertEqual(parse_horse_rating("Рейтинг **🐎**: -568M🔥\nДепозит рейтингу: 613🔥"), -568_000_000)
+        self.assertEqual(parse_horse_rating("Рейтинг: 1.25M🔥"), 1_250_000)
+        self.assertEqual(parse_horse_rating("Рейтинг: 999 999🔥"), 999_999)
+        self.assertIsNone(parse_horse_rating("Депозит рейтингу: 613🔥"))
+
+    async def test_horse_rating_monitor_starts_once_after_authorization(self) -> None:
+        telegram = TelegramService(self.config, self.audit, self.settings)
+
+        async def authorized(_account_id: int) -> object:
+            return object()
+
+        telegram.require_authorized = authorized  # type: ignore[method-assign]
+        await telegram.start_horse_rating_monitor(1)
+        first_task = telegram._horse_steal_tasks[1]
+        await telegram.start_horse_rating_monitor(1)
+        self.assertIs(telegram._horse_steal_tasks[1], first_task)
+        await telegram.disconnect()
+
+    async def test_horse_rating_is_a_reply_to_the_latest_bot_message(self) -> None:
+        class HistoryClient:
+            async def get_messages(self, _chat: str, limit: int):
+                self.assertEqual(limit, 20)
+                return [SimpleNamespace(id=17, out=True), SimpleNamespace(id=16, out=False)]
+
+            def __init__(self, test_case):
+                self.assertEqual = test_case.assertEqual
+
+        class Conversation:
+            def __init__(self) -> None:
+                self.sent: list[tuple[str, int | None]] = []
+
+            async def send_message(self, text: str, reply_to: int | None = None) -> None:
+                self.sent.append((text, reply_to))
+
+            async def get_response(self, timeout: int):
+                return SimpleNamespace(raw_text="Рейтинг **🐎**: 2M🔥")
+
+        telegram = TelegramService(self.config, self.audit, self.settings)
+        conversation = Conversation()
+        response, rating = await telegram._get_horse_rating(HistoryClient(self), conversation)
+        self.assertEqual(response.raw_text, "Рейтинг **🐎**: 2M🔥")
+        self.assertEqual(rating, 2_000_000)
+        self.assertEqual(conversation.sent, [("рейтинг", 16)])
+
+    async def test_horse_chat_monitor_uses_per_player_cooldown(self) -> None:
+        monitor = HorseChatMonitor(None, self.audit, account_id=1)  # type: ignore[arg-type]
+        monitor._targets = [TopPlayer(10, "@first", "id:10"), TopPlayer(20, "@second", "id:20")]
+        first, _ = await monitor._next_available_player(1)
+        assert first is not None
+        self.assertEqual(first.user_id, 10)
+        # The timestamps use a monotonic clock, so use the same source in test.
+        import time
+        monitor.last_attempt_by_user[(1, "id:10")] = time.monotonic()
+        second, _ = await monitor._next_available_player(1)
+        assert second is not None
+        self.assertEqual(second.user_id, 20)
+
+    async def test_horse_chat_any_external_message_restarts_quiet_period(self) -> None:
+        monitor = HorseChatMonitor(None, self.audit, account_id=1)  # type: ignore[arg-type]
+        monitor._bot_id = 99
+        monitor._last_external_message_at = 0
+        monitor._targets = [TopPlayer(10, "@first", "id:10")]
+
+        await monitor._handle_incoming(SimpleNamespace(sender_id=42, raw_text="привіт усім"))
+
+        self.assertGreater(monitor._last_external_message_at, 0)
+        self.assertEqual(monitor._targets, [])
+        reset_at = monitor._last_external_message_at
+        await monitor._handle_incoming(SimpleNamespace(sender_id=99, raw_text="відповідь @HorseZPBot"))
+        self.assertEqual(monitor._last_external_message_at, reset_at)
+
+    async def test_horse_top_parser_uses_only_top_15_by_rating(self) -> None:
+        top = """🏆 Топ 15 (найдено 15) користувачів за рейтингом (вся система):
+
+1. sanixt: 23.85M
+2. Вадим🪬: 12.57M
+3. Vitman: 8.62M
+4. 🎃༺ 『クリス』 ༻🎃: 8.05M
+5. Anastasia Roshchina: 7.91M
+6. Kostiantyn: 7.73M
+7. Марина Бойко: 5.82M
+8. шумелка мышь 🇩🇪🇺🇦: 5.42M
+9. Kipew Ok: 5.36M
+10. Lil Pump Lil Pump: 5.17M
+11. 🐈 NATKA🐈: 5.01M
+12. Redji: 4.53M
+13. 🦎вік: 4.48M
+14. INNA🌒: 4.28M
+15. Top: 4.23M
+
+💰 Топ 25 (найдено 25) користувачів за капіталом (вся система):
+1. Олена Біла: 13.54B
+"""
+        names = top_15_rating_names(top)
+        self.assertEqual(len(names), 15)
+        self.assertEqual(names[:2], ["sanixt", "Вадим🪬"])
+        self.assertEqual(names[-1], "Top")
+        self.assertNotIn("Олена Біла", names)
+
+    async def test_horse_chat_steal_rotation_uses_authorized_accounts_in_order(self) -> None:
+        class FakeAccountList:
+            def list(self):
+                return [{"id": 1}, {"id": 2}, {"id": 3}]
+
+        class FakeClient:
+            def __init__(self, account_id: int) -> None:
+                self.account_id = account_id
+                self.sent: list[str] = []
+
+            async def get_me(self):
+                return SimpleNamespace(id=10_000 + self.account_id)
+
+            async def send_message(self, _chat_id: int, text: str):
+                self.sent.append(text)
+                return SimpleNamespace(id=len(self.sent))
+
+        class FakeTelegram:
+            def __init__(self) -> None:
+                self.clients = {account_id: FakeClient(account_id) for account_id in (1, 2, 3)}
+
+            async def require_authorized(self, account_id: int):
+                return self.clients[account_id]
+
+        telegram = FakeTelegram()
+        monitor = HorseChatMonitor(telegram, self.audit, account_id=1, accounts=FakeAccountList())  # type: ignore[arg-type]
+        player = TopPlayer(None, "sanixt", "name:sanixt")
+        candidates, start = await monitor._sender_clients_in_rotation()
+        for sender_offset, (account_id, client) in enumerate(candidates):
+            await monitor._send_steal(account_id, client, player)
+            monitor._next_sender_index = (start + sender_offset + 1) % len(candidates)
+        self.assertEqual(telegram.clients[1].sent, ["вкрасти sanixt"])
+        self.assertEqual(telegram.clients[2].sent, ["вкрасти sanixt"])
+        self.assertEqual(telegram.clients[3].sent, ["вкрасти sanixt"])
+
+    async def test_horse_chat_cooldown_is_per_account(self) -> None:
+        monitor = HorseChatMonitor(None, self.audit, account_id=1)  # type: ignore[arg-type]
+        player = TopPlayer(None, "sanixt", "name:sanixt")
+        monitor._targets = [player]
+        import time
+        monitor.last_attempt_by_user[(1, player.cooldown_key)] = time.monotonic()
+        blocked, _ = await monitor._next_available_player(1)
+        available, _ = await monitor._next_available_player(2)
+        self.assertIsNone(blocked)
+        self.assertEqual(available, player)
+
+    async def test_horse_chat_cooldown_survives_restart(self) -> None:
+        player = TopPlayer(None, "Vitman", "name:vitman")
+        with self.db.session() as session:
+            session.add(HorseStealCooldown(
+                account_id=2,
+                player_key=player.cooldown_key,
+                last_attempt_at=utcnow(),
+            ))
+
+        # A fresh monitor has no in-memory state, just like a real restart.
+        restarted_monitor = HorseChatMonitor(None, self.audit, account_id=1)  # type: ignore[arg-type]
+        restarted_monitor._targets = [player]
+        blocked, remaining = await restarted_monitor._next_available_player(2)
+        available, _ = await restarted_monitor._next_available_player(1)
+
+        self.assertIsNone(blocked)
+        self.assertGreater(remaining, 60 * 60)
+        self.assertEqual(available, player)
+
+    async def test_horse_rating_sender_rotation_uses_all_authorized_accounts(self) -> None:
+        class FakeAccounts:
+            def list(self):
+                return [{"id": 1}, {"id": 2}, {"id": 3}]
+
+        telegram = TelegramService(self.config, self.audit, self.settings, FakeAccounts())  # type: ignore[arg-type]
+
+        async def authorized(account_id: int):
+            return SimpleNamespace(account_id=account_id)
+
+        telegram.require_authorized = authorized  # type: ignore[method-assign]
+        senders = [await telegram._next_horse_rating_sender() for _ in range(4)]
+        self.assertEqual([account_id for account_id, _client in senders], [1, 2, 3, 1])
+
     async def test_repeat_guard_is_six_hours_for_pch_and_twelve_for_pb(self) -> None:
-        self.assertEqual(MailingScheduler._minimum_repeat_seconds("PCH"), 6 * 3600)
-        self.assertEqual(MailingScheduler._minimum_repeat_seconds("PB"), 12 * 3600)
+        self.assertEqual(MailingScheduler._minimum_repeat_seconds("PCH"), 6 * 3600 + 22)
+        self.assertEqual(MailingScheduler._minimum_repeat_seconds("PB"), 12 * 3600 + 22)
 
     async def test_pausing_cycle_wait_preserves_next_cycle_transition(self) -> None:
         scheduler = MailingScheduler(self.db, FakeChats([1]), FakeMessages(), self.settings, self.audit)

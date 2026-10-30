@@ -28,6 +28,7 @@ class AppConfig:
     group_delay_seconds: int
     log_level: str
     auto_reconnect: bool
+    telegram_device_model: str
     host: str
     port: int
     data_dir: Path
@@ -40,8 +41,8 @@ class AppConfig:
     @classmethod
     def load(cls) -> "AppConfig":
         load_dotenv(PROJECT_ROOT / ".env")
-        # This is normally the project's data directory. The override exists for
-        # isolated tests and does not alter the documented default installation.
+        # Зазвичай це директорія даних проекту. Перевизначення існує для
+        # ізольованих тестів і не змінює задокументовану стандартну інсталяцію.
         data_dir = Path(os.getenv("SCHEDULER_DATA_DIR", str(DATA_DIR))).expanduser()
         data_dir.mkdir(parents=True, exist_ok=True)
         api_id_raw = os.getenv("API_ID", "").strip()
@@ -60,6 +61,7 @@ class AppConfig:
             data_dir=data_dir,
             database_url=f"sqlite:///{data_dir / 'scheduler.sqlite3'}",
             telegram_session_path=str(data_dir / "telegram.session"),
+            telegram_device_model=os.getenv("TELEGRAM_DEVICE_MODEL", "AutoTelegramHorse"),
             gemini_api_key=os.getenv("GEMINI_API_KEY", "").strip() or None,
             gemini_model=os.getenv("GEMINI_MODEL", "gemini-flash-lite-latest").strip() or "gemini-flash-lite-latest",
             terminal_idle_report_seconds=max(10, int(os.getenv("TERMINAL_IDLE_REPORT_SECONDS", "60"))),
@@ -72,6 +74,8 @@ DEFAULT_SETTINGS = {
     "pch_groups": 6,
     "pb_groups": 12,
     "group_delay_seconds": 3600,
+    "pch_pb_delay_seconds": 0,
+    "telegram_device_model": "AutoTelegramHorse",
     "log_level": "INFO",
     "auto_reconnect": True,
     "theme": "dark",

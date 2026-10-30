@@ -45,8 +45,8 @@ class Chat(Base):
     pb_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
     gemini_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
     keyword_reply_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
-    # Kept for database compatibility with old installations.  It is no longer
-    # used or exposed: chat eligibility is entirely controlled by the user.
+    # Збережено для сумісності бази даних зі старими інсталяціями. Більше не
+    # використовується або відображається: відповідність чату повністю контролюється користувачем.
     bot_username: Mapped[str] = mapped_column(String(255), default="legacy")
     bot_status: Mapped[str] = mapped_column(String(32), default="CHECK_PENDING", index=True)
     bot_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -55,13 +55,14 @@ class Chat(Base):
 
 
 class FarmState(Base):
-    """Durable one-chat schedule for the Farm mailing."""
+    """Стійкий розклад для одного чату для Farm розсилки."""
 
     __tablename__ = "farm_states"
     account_id: Mapped[int] = mapped_column(Integer, primary_key=True)
     enabled: Mapped[bool] = mapped_column(Boolean, default=False)
     chat_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
     message_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    interval_hours: Mapped[int] = mapped_column(Integer, default=23)  # 23, 71, 119, 167, 335, 559
     status: Mapped[str] = mapped_column(String(32), default="IDLE", index=True)
     next_send_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
     last_sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -70,7 +71,7 @@ class FarmState(Base):
 
 
 class PSState(Base):
-    """Durable one-chat schedule for the PS mailing (23 hours 58 minutes)."""
+    """Стійкий розклад для одного чату для PS розсилки (23 години 58 хвилин)."""
 
     __tablename__ = "ps_states"
     account_id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -165,6 +166,20 @@ class GeminiHistory(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
 
 
+class UserCooldown(Base):
+    """Персональний cooldown для кожного користувача для функції 'Нагодувати гівном'."""
+
+    __tablename__ = "user_cooldowns"
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    account_id: Mapped[int] = mapped_column(Integer, index=True)
+    user_id: Mapped[int] = mapped_column(Integer, index=True)
+    username: Mapped[str | None] = mapped_column(String, nullable=True)
+    last_fed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+    __table_args__ = (UniqueConstraint("account_id", "user_id", name="uq_account_user"),)
+
+
 class KeywordReplyState(Base):
     """Durable account-wide cooldown for the short keyword auto-reply."""
 
@@ -190,4 +205,31 @@ class KeywordReplyGlobalState(Base):
     __tablename__ = "keyword_reply_global_state"
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     last_sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
+class FeedState(Base):
+    """Стан функції 'Нагодувати гівном' для одного акаунту."""
+
+    __tablename__ = "feed_states"
+    account_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    username_to_feed: Mapped[str | None] = mapped_column(String, nullable=True, default="PikaOlex")
+    message_text: Mapped[str | None] = mapped_column(Text, nullable=True, default="нагодувати гівном")
+    status: Mapped[str] = mapped_column(String(32), default="IDLE", index=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
+class HorseRatingState(Base):
+    """Стан Horse rating monitor для кожного акаунту."""
+
+    __tablename__ = "horse_rating_states"
+    account_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    status: Mapped[str] = mapped_column(String(32), default="IDLE", index=True)
+    last_check_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_steal_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    cooldown_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    last_rating: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)

@@ -23,6 +23,7 @@ class SettingsService:
             "pch_groups": self.config.pch_groups,
             "pb_groups": self.config.pb_groups,
             "group_delay_seconds": self.config.group_delay_seconds,
+            "telegram_device_model": self.config.telegram_device_model,
             "log_level": self.config.log_level,
             "auto_reconnect": self.config.auto_reconnect,
         }
@@ -34,10 +35,10 @@ class SettingsService:
 
     def get_all(self) -> dict[str, Any]:
         with self.db.session() as session:
-            # Scheduler templates deliberately use the same table but are plain
-            # text, whereas the UI settings are JSON-encoded scalars.  Restrict
-            # this response to configurable settings so a message body can never
-            # make the Settings endpoint fail to decode.
+            # Шаблони планувальника навмисно використовують ту саму таблицю, але це
+            # звичайний текст, тоді як налаштування UI закодовані в JSON. Обмежуємо
+            # цю відповідь налаштованими, щоб тіло повідомлення ніколи не могло
+            # зламати декодування endpoint налаштувань.
             rows = {s.key: s.value for s in session.scalars(select(Setting)).all()}
             values: dict[str, Any] = {}
             for key in DEFAULT_SETTINGS:
@@ -47,8 +48,8 @@ class SettingsService:
                 try:
                     values[key] = json.loads(raw)
                 except json.JSONDecodeError:
-                    # A legacy/manual value is ignored in favour of the safe
-                    # default rather than breaking the whole Web UI.
+                    # Застаріле/ручне значення ігнорується на користь безпечного
+                    # дефолту замість зламу всього Web UI.
                     continue
         return {**DEFAULT_SETTINGS, **values}
 

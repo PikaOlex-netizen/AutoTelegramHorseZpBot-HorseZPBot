@@ -12,7 +12,7 @@ from .chats import ChatManager
 from .messages import MessageManager
 
 
-FARM_INTERVAL_SECONDS = 3 * 60 * 60 + 58 * 60 + 22
+FARM_INTERVAL_OPTIONS = [23, 71, 119, 167, 335, 559]  # годин
 
 
 def _future(value: datetime | None) -> bool:
@@ -24,7 +24,7 @@ def _future(value: datetime | None) -> bool:
 
 
 class FarmScheduler:
-    """Durable repeating sender with one selected destination per account."""
+    """Стійкий повторюваний відправник з однією вибраною адресою для кожного акаунту."""
 
     def __init__(
         self, db: Database, chats: ChatManager, messages: MessageManager,
@@ -43,51 +43,57 @@ class FarmScheduler:
     def initialize(self) -> None:
         with self.db.session() as session:
             if session.get(FarmState, self.account_id) is None:
-                session.add(FarmState(account_id=self.account_id))
+                session.add(FarmState(account_id=self.account_id, interval_hours=23))
 
     def get_state(self) -> dict[str, Any]:
         with self.db.session() as session:
             state = session.get(FarmState, self.account_id)
             assert state is not None
-            # Convert UTC to local time for display
+            # Перетворити UTC на місцевий час для відображення
             def to_local(dt):
                 if dt is None:
                     return None
                 if dt.tzinfo is None:
                     dt = dt.replace(tzinfo=timezone.utc)
                 return dt.astimezone().isoformat()
-            # Default text for Farm
-            message_text = state.message_text or "ферма"
+            # Текст завжди "ферма рестарт"
+            message_text = "ферма рестарт"
+            # Інтервал в секундах і текст
+            interval_hours = state.interval_hours or 23
+            interval_seconds = interval_hours * 3600
+            interval_text = f"{interval_hours} годин"
             return {
                 "account_id": self.account_id,
                 "enabled": state.enabled,
                 "chat_id": state.chat_id,
                 "message_text": message_text,
+                "interval_hours": interval_hours,
+                "interval_options": FARM_INTERVAL_OPTIONS,
                 "status": state.status,
                 "next_send_at": to_local(state.next_send_at),
                 "last_sent_at": to_local(state.last_sent_at),
                 "last_error": state.last_error,
-                "interval_seconds": FARM_INTERVAL_SECONDS,
-                "interval_text": "3 години 58 хвилин 22 секунди",
+                "interval_seconds": interval_seconds,
+                "interval_text": interval_text,
             }
 
-    async def configure(self, *, chat_id: int | None, text: str | None, enabled: bool) -> dict[str, Any]:
+    async def configure(self, *, chat_id: int | None, interval_hours: int, enabled: bool) -> dict[str, Any]:
         async with self._lock:
-            text = (text or "").strip()
+            if interval_hours not in FARM_INTERVAL_OPTIONS:
+                raise ValueError(f"Недійсний інтервал: {interval_hours}")
             if enabled:
                 if chat_id is None:
                     raise ValueError("Выберите чат для Фермы")
-                if not text:
-                    raise ValueError("Введите текст для Фермы")
                 if not self.chats.is_currently_eligible(self.account_id, chat_id):
                     raise ValueError("Выбранный чат не входит в активный список чатов")
             with self.db.session() as session:
                 state = session.get(FarmState, self.account_id)
                 assert state is not None
-                changed = state.chat_id != chat_id or state.message_text != text
+                changed = state.chat_id != chat_id or state.interval_hours != interval_hours
                 was_enabled = state.enabled
                 state.chat_id = chat_id
-                state.message_text = text or None
+                state.message_text = "ферма рестарт"
+                state.interval_hours = interval_hours
                 state.enabled = enabled
                 state.last_error = None
                 if enabled:
@@ -99,7 +105,7 @@ class FarmScheduler:
                     state.next_send_at = None
             self.audit.write(
                 "INFO", "farm", "configured",
-                "Farm schedule enabled" if enabled else "Farm schedule stopped",
+                "Розклад Farm увімкнено" if enabled else "Розклад Farm зупинено",
                 account_id=self.account_id, chat_id=chat_id,
             )
             if enabled:
@@ -117,7 +123,7 @@ class FarmScheduler:
                 state.next_send_at = utcnow()
             should_restore = state.enabled and state.status in {"WAITING", "SENDING"}
         if should_restore:
-            self.audit.write("INFO", "farm", "restored", "Farm schedule restored after restart", account_id=self.account_id)
+            self.audit.write("INFO", "farm", "restored", "Розклад Farm відновлено після перезапуску", account_id=self.account_id)
             self._ensure_runner()
 
     def _ensure_runner(self) -> None:
@@ -139,9 +145,8 @@ class FarmScheduler:
                     return
                 next_at = datetime.fromisoformat(state["next_send_at"]) if state["next_send_at"] else None
                 if _future(next_at):
-                    if next_at and next_at.tzinfo is None:
-                        next_at = next_at.replace(tzinfo=timezone.utc)
-                    await self._wait((next_at.timestamp() - utcnow().timestamp()))
+                    delay = (next_at - utcnow()).total_seconds()
+                    await self._wait(delay)
                     continue
                 await self._send_once()
             except asyncio.CancelledError:
@@ -153,7 +158,7 @@ class FarmScheduler:
                         state.status = "WAITING"
                         state.next_send_at = utcnow() + timedelta(seconds=60)
                         state.last_error = type(exc).__name__
-                self.audit.write("ERROR", "farm", "worker_failed", f"Farm worker recovered from {type(exc).__name__}", account_id=self.account_id)
+                self.audit.write("ERROR", "farm", "worker_failed", f"Farm worker відновлено від {type(exc).__name__}", account_id=self.account_id)
                 await self._wait(60)
 
     async def _send_once(self) -> None:
@@ -169,20 +174,20 @@ class FarmScheduler:
                     state.enabled = False
                     state.status = "STOPPED"
                     state.next_send_at = None
-                    state.last_error = "Selected chat is no longer active"
+                    state.last_error = "Вибраний чат більше не активний"
                     selected_chat_unavailable = True
                 else:
                     state.status = "SENDING"
             if selected_chat_unavailable:
                 self.audit.write(
                     "WARNING", "farm", "chat_unavailable",
-                    "Farm stopped because its selected chat was removed from the working list",
+                    "Farm зупинено, оскільки його вибраний чат було видалено з робочого списку",
                     account_id=self.account_id, chat_id=chat_id,
                 )
                 return
         try:
-            # Farm is a repeating presence in the selected chat, so its messages
-            # must stay visible.  PCH/PB keep their independent deletion policy.
+            # Farm - це повторювана присутність у вибраному чаті, тому його повідомлення
+            # повинні залишатися видимими. PCH/PB зберігають свою незалежну політику видалення.
             message_id = await self.messages.send(
                 self.account_id, chat_id, text, "FARM", schedule_deletion=False,
             )
@@ -193,16 +198,17 @@ class FarmScheduler:
                     state.status = "WAITING"
                     state.next_send_at = utcnow() + timedelta(seconds=60)
                     state.last_error = type(exc).__name__
-            self.audit.write("ERROR", "farm", "send_failed", f"Farm message failed: {type(exc).__name__}", account_id=self.account_id, chat_id=chat_id)
+            self.audit.write("ERROR", "farm", "send_failed", f"Повідомлення Farm не вдалося: {type(exc).__name__}", account_id=self.account_id, chat_id=chat_id)
             return
         with self.db.session() as session:
             state = session.get(FarmState, self.account_id)
             if state and state.enabled:
                 state.status = "WAITING"
                 state.last_sent_at = utcnow()
-                state.next_send_at = utcnow() + timedelta(seconds=FARM_INTERVAL_SECONDS)
+                interval_hours = state.interval_hours or 23
+                state.next_send_at = utcnow() + timedelta(hours=interval_hours)
                 state.last_error = None
-        self.audit.write("INFO", "farm", "sent", f"Farm message sent (Telegram message {message_id})", account_id=self.account_id, chat_id=chat_id, message_id=message_id)
+        self.audit.write("INFO", "farm", "sent", f"Повідомлення Farm відправлено (повідомлення Telegram {message_id})", account_id=self.account_id, chat_id=chat_id, message_id=message_id)
 
     async def shutdown(self) -> None:
         self._shutting_down = True

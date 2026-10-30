@@ -1,39 +1,39 @@
 # HTTP API
 
-All endpoints are local by default at `http://127.0.0.1:8000`. JSON write requests use `Content-Type: application/json`.
+Усі ендпоінти за замовчуванням локальні за адресою `http://127.0.0.1:8000`. Записи JSON використовують `Content-Type: application/json`.
 
-| Method | Endpoint | Purpose |
+| Метод | Ендпоінт | Призначення |
 |---|---|---|
-| GET | `/api/status` | dashboard summary |
-| GET | `/api/accounts` | up to three account profiles and their non-secret Telegram states |
-| POST | `/api/accounts` | create account profile: `{ "label": "Work" }` |
-| POST | `/api/accounts/{id}/select` | choose the account scope used by the UI and following requests |
-| GET | `/api/auth/status` | non-secret Telegram state |
-| POST | `/api/auth/phone` | request code: `{ "phone": "+…" }` |
-| POST | `/api/auth/code` | submit code: `{ "code": "…" }` |
-| POST | `/api/auth/2fa` | submit password: `{ "password": "…" }` |
-| POST | `/api/auth/qr` | create a live QR token and PNG data URI |
-| POST | `/api/auth/logout` | log out and invalidate session |
-| GET | `/api/chats` | stored groups |
-| POST | `/api/chats/refresh` | import current Telegram dialogs into the manual list |
-| POST | `/api/chats` | add a Telegram chat by `{ "chat_id": 123 }` |
-| PUT | `/api/chats/{id}` | set `pch_enabled`, `pb_enabled`, `gemini_enabled`, `keyword_reply_enabled`, or `enabled` |
-| DELETE | `/api/chats/{id}` | remove from both active mailing lists |
-| GET | `/api/messages` | persisted outbound messages and delete task state |
-| POST | `/api/messages/send` | manual verified send `{chat_id,text,message_type}` |
-| GET | `/api/scheduler/status` | both persisted scheduler states |
-| GET/PUT | `/api/farm` | get or configure one-chat Farm schedule (3 hours 58 minutes) |
-| POST | `/api/scheduler/{pch\|pb}/start` | start snapshot, optional `{text}` |
-| POST | `/api/scheduler/{pch\|pb}/pause` | pause after current safe operation |
-| POST | `/api/scheduler/{pch\|pb}/resume` | resume existing plan |
-| POST | `/api/scheduler/{pch\|pb}/stop` | stop existing plan |
-| GET/PUT | `/api/scheduler/{pch\|pb}/template` | get/save real send text |
-| GET/PUT | `/api/settings` | get/save validated settings |
-| GET/PUT | `/api/gemini/settings` | get/save Gemini settings for the selected account; enabling requires `GEMINI_API_KEY` |
-| GET | `/api/logs` | filterable persistent logs (`level`, `module`, `q`, `chat_id`, `message_id`) |
-| GET | `/api/events` | Server-Sent Event stream: `log.created` |
-| GET | `/api/system` | non-secret persistence/recovery state |
+| GET | `/api/status` | підсумок інформаційної панелі |
+| GET | `/api/accounts` | до трьох профілів акаунтів та їх нестійкі стани Telegram |
+| POST | `/api/accounts` | створити профіль акаунту: `{ "label": "Work" }` |
+| POST | `/api/accounts/{id}/select` | вибрати область дії акаунту, що використовується UI та наступними запитами |
+| GET | `/api/auth/status` | нестійкий стан Telegram |
+| POST | `/api/auth/phone` | запросити код: `{ "phone": "+…" }` |
+| POST | `/api/auth/code` | надіслати код: `{ "code": "…" }` |
+| POST | `/api/auth/2fa` | надіслати пароль: `{ "password": "…" }` |
+| POST | `/api/auth/qr` | створити діючий QR токен та PNG data URI |
+| POST | `/api/auth/logout` | вийти та анулювати сесію |
+| GET | `/api/chats` | збережені групи |
+| POST | `/api/chats/refresh` | імпортувати поточні діалоги Telegram у ручний список |
+| POST | `/api/chats` | додати чат Telegram за `{ "chat_id": 123 }` |
+| PUT | `/api/chats/{id}` | встановити `pch_enabled`, `pb_enabled`, `gemini_enabled`, `keyword_reply_enabled` або `enabled` |
+| DELETE | `/api/chats/{id}` | видалити з обох активних списків розсилки |
+| GET | `/api/messages` | збережені вихідні повідомлення та стан задачі видалення |
+| POST | `/api/messages/send` | ручна перевірена відправка `{chat_id,text,message_type}` |
+| GET | `/api/scheduler/status` | обидва збережені стани планувальника |
+| GET/PUT | `/api/farm` | отримати або налаштувати розклад Ферми для одного чату (3 години 58 хвилин) |
+| POST | `/api/scheduler/{pch\|pb}/start` | запустити знімок, опціонально `{text}` |
+| POST | `/api/scheduler/{pch\|pb}/pause` | призупинити після поточної безпечної операції |
+| POST | `/api/scheduler/{pch\|pb}/resume` | відновити існуючий план |
+| POST | `/api/scheduler/{pch\|pb}/stop` | зупинити існуючий план |
+| GET/PUT | `/api/scheduler/{pch\|pb}/template` | отримати/зберегти реальний текст відправки |
+| GET/PUT | `/api/settings` | отримати/зберегти валідовані налаштування |
+| GET/PUT | `/api/gemini/settings` | отримати/зберегти налаштування Gemini для вибраного акаунту; увімкнення вимагає `GEMINI_API_KEY` |
+| GET | `/api/logs` | фільтровані постійні журнали (`level`, `module`, `q`, `chat_id`, `message_id`) |
+| GET | `/api/events` | потік Server-Sent Event: `log.created` |
+| GET | `/api/system` | нестійкий стан збереження/відновлення |
 
-Error responses use `{ "detail": "safe description" }`. Credential values, codes and passwords are never returned or logged.
+Відповіді з помилками використовують `{ "detail": "безпечний опис" }`. Значення облікових даних, коди та паролі ніколи не повертаються або не записуються в журнал.
 
-All chat, message, scheduler and log endpoints use the currently selected local account profile. The Event stream likewise sends account-scoped entries plus system events only.
+Усі ендпоінти чатів, повідомлень, планувальника та журналів використовують поточний вибраний локальний профіль акаунту. Потік подій аналогічно надсилає записи області дії акаунту плюс лише системні події.

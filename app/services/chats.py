@@ -61,16 +61,16 @@ class ChatManager:
         return {"added": added, "updated": updated, "total": len(dialogs)}
 
     async def add_from_telegram(self, account_id: int, chat_id: int) -> dict[str, Any]:
-        # Resolve through Telegram so a pasted id is normalized to its signed peer id.
+        # Вирішити через Telegram, щоб вставлений id нормалізувався до його підписаного peer id.
         client = await self.telegram.require_authorized(account_id)
         entity = await client.get_entity(chat_id)
         if not isinstance(entity, Channel) or not entity.megagroup:
-            raise ValueError("Only Telegram supergroups can be added to Chats")
+            raise ValueError("До чатів можна додавати лише Telegram супергрупи")
         title = getattr(entity, "title", None) or utils.get_display_name(entity)
         if not title:
-            raise ValueError("Telegram chat could not be resolved")
-        # Store Telegram's signed peer id (-123 / -100123), so raw ids from two
-        # peer types cannot collide and a pasted peer id cannot duplicate a dialog.
+            raise ValueError("Не вдалося вирішити Telegram чат")
+        # Зберегти підписаний peer id Telegram (-123 / -100123), щоб сирий id з двох
+        # типів peer не могли конфліктувати, а вставлений peer id не міг дублювати діалог.
         chat_id = int(utils.get_peer_id(entity))
         with self.db.session() as session:
             chat = session.scalar(select(Chat).where(Chat.account_id == account_id, Chat.chat_id == chat_id))
@@ -82,13 +82,13 @@ class ChatManager:
                 )
                 session.add(chat)
             else:
-                # Re-adding a manually archived group restores only that group;
-                # no historical chats are silently re-enabled by a dialog refresh.
+                # Повторне додавання вручну заархівованої групи відновлює лише цю групу;
+                # історичні чати не мовчки повторно увімкнюються оновленням діалогу.
                 chat.enabled = True
                 chat.title = title
                 chat.username = getattr(entity, "username", None)
                 chat.bot_status = "MANUAL"
-        self.audit.write("INFO", "chats", "manually_added", "Chat added to the manual working list", account_id=account_id, chat_id=chat_id)
+        self.audit.write("INFO", "chats", "manually_added", "Чат додано до робочого списку", account_id=account_id, chat_id=chat_id)
         result = self.get(account_id, chat_id)
         assert result is not None
         return result
@@ -103,7 +103,7 @@ class ChatManager:
         with self.db.session() as session:
             chat = session.scalar(select(Chat).where(Chat.account_id == account_id, Chat.chat_id == chat_id))
             if chat is None:
-                raise KeyError(f"Chat {chat_id} does not exist")
+                raise KeyError(f"Чат {chat_id} не існує")
             if pch_enabled is not None:
                 chat.pch_enabled = pch_enabled
             if pb_enabled is not None:
@@ -130,16 +130,16 @@ class ChatManager:
         with self.db.session() as session:
             chat = session.scalar(select(Chat).where(Chat.account_id == account_id, Chat.chat_id == chat_id))
             if chat is None:
-                raise KeyError(f"Chat {chat_id} does not exist")
+                raise KeyError(f"Чат {chat_id} не існує")
             chat.pch_enabled = False
             chat.pb_enabled = False
             chat.gemini_enabled = False
             chat.keyword_reply_enabled = False
             chat.enabled = False
-        self.audit.write("INFO", "chats", "archived", "Chat removed from manual working list", account_id=account_id, chat_id=chat_id)
+        self.audit.write("INFO", "chats", "archived", "Чат видалено з робочого списку", account_id=account_id, chat_id=chat_id)
 
     def eligible_chat_ids(self, account_id: int, mailing_type: str) -> list[int]:
-        """Manual target list; only the user's assignment is considered."""
+        """Цільовий список вручну; розглядається лише призначення користувача."""
         field = Chat.pch_enabled if mailing_type == "PCH" else Chat.pb_enabled
         with self.db.session() as session:
             return list(session.scalars(
@@ -158,7 +158,7 @@ class ChatManager:
                 return chat.pch_enabled
             if mailing_type == "PB":
                 return chat.pb_enabled
-            # PS and Farm (single-chat selections) only require the chat to be enabled
+            # PS і Farm (вибір одного чату) вимагають лише, щоб чат був увімкнений
             if mailing_type in {"PS", "FARM"}:
                 return True
             return True
@@ -169,13 +169,13 @@ class ChatManager:
             return bool(chat and chat.enabled and chat.gemini_enabled)
 
     def is_keyword_reply_enabled(self, account_id: int, chat_id: int) -> bool:
-        """Keyword replies are opt-in per manually selected group."""
+        """Відповіді на ключові слова - це opt-in для кожної вручну вибраної групи."""
         with self.db.session() as session:
             chat = session.scalar(select(Chat).where(Chat.account_id == account_id, Chat.chat_id == chat_id))
             return bool(chat and chat.enabled and chat.keyword_reply_enabled)
 
     def has_keyword_reply_enabled(self, account_id: int) -> bool:
-        """Avoid opening a Telegram session when this optional rule is unused."""
+        """Уникати відкриття сесії Telegram, коли це необов'язкове правило не використовується."""
         with self.db.session() as session:
             return session.scalar(
                 select(Chat.id).where(

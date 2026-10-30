@@ -1,4 +1,4 @@
-# Architecture
+# Архітектура
 
 ```text
 Web UI ──HTTP/SSE──> FastAPI API
@@ -13,7 +13,7 @@ TelegramService ─── Manual chat manager ─── SQLite storage / AuditLo
      │                    │
      │            ┌───────┴────────┐
      │            │                │
-     │       PCH scheduler     PB scheduler
+     │       ПЧ scheduler     ПБ scheduler
      │        6 groups          12 groups
      │            └───────┬────────┘
      │                    │
@@ -26,32 +26,32 @@ TelegramService ─── Manual chat manager ─── SQLite storage / AuditLo
                 KeywordReplyAssistant
 ```
 
-## Modules
+## Модулі
 
-- `app/services/accounts.py` — creates and switches up to three locally stored Telegram-account profiles.
-- `app/services/telegram_client.py` — only module making Telegram RPC calls. It owns an isolated Telethon session per account, Phone/QR authentication, reconnection settings, send, read and delete operations.
-- `app/services/chats.py` — imports Telegram dialogs, resolves manually entered Chat IDs, preserves history and controls independent ПЧ/ПБ assignments.
-- `app/services/farm.py` — durable one-chat sender with a 3-hour-58-minute interval and restart recovery.
-- `app/services/scheduler.py` — two durable, separate async runners for each account. `SchedulerState` stores the next group and timestamp; `SchedulerDelivery` is an account-scoped idempotent per-chat ledger within a run.
-- `app/services/messages.py` — persists outbound messages and `DeleteTask` rows for temporary PCH/PB/manual sends, checks existence before deletion and applies bounded retry; Farm and Gemini messages are persistent and legacy deletion tasks are cancelled during recovery.
-- `app/services/settings.py` — persistent, validated UI settings. Environment values initialise defaults on first run.
-- `app/services/audit.py` — persistent audit log and in-process fanout for SSE.
-- `app/services/gemini.py` — optional Gemini responder. It receives only incoming messages, then checks both the account-level setting and the manually enabled group before calling Gemini.
-- `app/services/keyword_reply.py` — exact-match responder for `ом`, `оч` and `об`. It replies `Вкрасти` to the original message only in manually enabled groups, with a durable one-minute cooldown per account plus a one-hour cooldown per triggering Telegram user.
-- `app/main.py` — FastAPI API, lifespan startup/recovery and graceful shutdown.
+- `app/services/accounts.py` — створює та перемикає до трьох локально збережених профілів Telegram-акаунтів.
+- `app/services/telegram_client.py` — єдиний модуль, що виконує виклики Telegram RPC. Він володіє ізольованою сесією Telethon для кожного акаунту, Phone/QR аутентифікацію, налаштування перепідключення, операції відправки, читання та видалення.
+- `app/services/chats.py` — імпортує діалоги Telegram, вирішує вручну введені Chat ID, зберігає історію та контролює незалежні призначення ПЧ/ПБ.
+- `app/services/farm.py` — стійкий відправник для одного чату з інтервалом 3 години 58 хвилин та відновленням після перезапуску.
+- `app/services/scheduler.py` — два стійких окремих асинхронних виконавці для кожного акаунту. `SchedulerState` зберігає наступну групу та мітку часу; `SchedulerDelivery` — це книга обліку для кожного чату в межах запуску.
+- `app/services/messages.py` — зберігає вихідні повідомлення та рядки `DeleteTask` для тимчасових відправок ПЧ/ПБ/ручних, перевіряє існування перед видаленням та застосовує обмежену кількість повторів; повідомлення Ферми та Gemini є постійними, а застарілі задачі видалення скасовуються під час відновлення.
+- `app/services/settings.py` — постійні, валідовані налаштування UI. Значення змінних середовища ініціалізують дефолти при першому запуску.
+- `app/services/audit.py` — постійний журнал аудиту та розповсюдження в процесі для SSE.
+- `app/services/gemini.py` — необов'язковий відповідач Gemini. Він отримує лише вхідні повідомлення, потім перевіряє як налаштування на рівні акаунту, так і вручну увімкнену групу перед викликом Gemini.
+- `app/services/keyword_reply.py` — відповідач з точним збігом для `ом`, `оч` та `об`. Він відповідає `Вкрасти` на оригінальне повідомлення лише у вручну увімкнених групах зі стійкою хвилинною паузою для акаунту та годинною паузою для кожного Telegram-користувача, що викликав відповідь.
+- `app/main.py` — FastAPI API, запуск/відновлення життєвого циклу та коректне завершення.
 
-## Durable state
+## Стійкий стан
 
-SQLite tables: `telegram_accounts`, `settings`, `chats`, `scheduler_states`, `scheduler_deliveries`, `outbound_messages`, `delete_tasks`, `gemini_history`, `keyword_reply_states`, and `logs`. Chat rows, delivery rows, messages and logs contain an account scope. Telethon sessions are separate: `data/telegram.session`, `data/telegram-account-2.session` and `data/telegram-account-3.session`.
+Таблиці SQLite: `telegram_accounts`, `settings`, `chats`, `scheduler_states`, `scheduler_deliveries`, `outbound_messages`, `delete_tasks`, `gemini_history`, `keyword_reply_states` та `logs`. Рядки чатів, доставки, повідомлень та журналів містять область дії акаунту. Сесії Telethon окремі: `data/telegram.session`, `data/telegram-account-2.session` та `data/telegram-account-3.session`.
 
-At Start a group plan is serialised into `scheduler_states.plan_json`; every target gets a delivery row. A restart turns an interrupted `SENDING` state back into runnable work and sends only remaining `PENDING` rows. Existing `SENT` delivery rows never run again. A claimed but unfinished delete task is reset from `PROCESSING` to `PENDING` on startup.
+При запуску план груп серіалізується в `scheduler_states.plan_json`; кожна ціль отримує рядок доставки. Перезапуск перетворює перерваний стан `SENDING` назад у виконувану роботу та відправляє лише рядки `PENDING`, що залишилися. Існуючі рядки доставки `SENT` ніколи не запускаються знову. Заявлена, але незавершена задача видалення скидається з `PROCESSING` на `PENDING` при запуску.
 
-## Manual-list policy and repeat guard
+## Політика ручного списку та захист від повторів
 
-The manual list is authoritative. Adding a chat resolves the supplied Chat ID through Telegram to prevent an incorrect ID from entering the list. A chat remains a target only when it is enabled and selected for the corresponding mailing.
+Ручний список є авторитетним. Додавання чату вирішує наданий Chat ID через Telegram, щоб запобігти входу неправильного ID до списку. Чат залишається ціллю лише тоді, коли він увімкнений та вибраний для відповідної розсилки.
 
-After the last group of a cycle, the next snapshot is built from the then-current manual list. The repeat guard schedules the cycle boundary so a ПЧ target cannot recur sooner than 21,600 seconds (6 hours) and a ПБ target cannot recur sooner than 43,200 seconds (12 hours), even if the number of groups is changed.
+Після останньої групи циклу наступний знімок будується з поточного на той момент ручного списку. Захист від повторів планує межу циклу так, щоб ціль ПЧ не могла повторитися раніше ніж через 21 600 секунд (6 годин), а ціль ПБ — раніше ніж через 43 200 секунд (12 годин), навіть якщо кількість груп змінена.
 
-## Concurrency model
+## Модель паралелізму
 
-FastAPI remains responsive because wait periods use `asyncio.Event`/timeouts in independent background tasks. Each mailing type has a separate lock and wake event per account. The delete worker and optional Gemini calls are also separate. SQLite transactions are deliberately short and no database transaction is held during network I/O. Terminal heartbeats use the live scheduler and delete-worker state, so an idle report is printed only while no send/delete action is running.
+FastAPI залишається чутливим, оскільки періоди очікування використовують `asyncio.Event`/тайм-аути в незалежних фонових задачах. Кожен тип розсилки має окремий замок та подію пробудження для кожного акаунту. Виконавець видалення та опціональні виклики Gemini також окремі. Транзакції SQLite навмисно короткі, і жодна транзакція бази даних не утримується під час мережевого I/O. Пульси терміналу використовують поточний стан планувальника та виконавця видалення, тому звіт про простій виводиться лише тоді, коли немає дії відправки/видалення.

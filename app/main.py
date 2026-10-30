@@ -12,13 +12,14 @@ from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import select
+from sqlalchemy.orm import Session
 
 from .config import AppConfig
 from .database import Database
 from .models import OutboundMessage, utcnow
 from .schemas import (
     AccountCreateRequest, AddChatRequest, ChatAssignmentRequest, CodeLoginRequest, ManualMessageRequest,
-    FarmSettingsRequest, GeminiSettingsRequest, PasswordLoginRequest, PhoneLoginRequest, PSSettingsRequest, SettingsRequest,
+    FarmSettingsRequest, FeedSettingsRequest, GeminiSettingsRequest, PasswordLoginRequest, PhoneLoginRequest, PSSettingsRequest, SettingsRequest,
     StartSchedulerRequest, TemplateRequest,
 )
 from .services.audit import AuditLog
@@ -32,6 +33,9 @@ from .services.ps import PSRegistry
 from .services.scheduler import SchedulerRegistry
 from .services.settings import SettingsService
 from .services.telegram_client import TelegramService, TelegramUnavailable
+from .services.feed_manager import FeedRegistry
+from .services.horse_rating_monitor import HorseRatingMonitor
+
 
 
 def application_services(request: Request) -> dict:
@@ -46,7 +50,7 @@ async def terminal_heartbeat(
     stop_event: asyncio.Event, accounts: AccountService, scheduler: SchedulerRegistry,
     messages: MessageManager, audit: AuditLog, interval: int,
 ) -> None:
-    """Give the terminal a useful confirmation during otherwise quiet periods."""
+    """Надавати терміналу корисне підтвердження під час інакше тихих періодів."""
     while not stop_event.is_set():
         try:
             await asyncio.wait_for(stop_event.wait(), timeout=interval)
@@ -61,7 +65,7 @@ async def terminal_heartbeat(
             active_sends = active_sends or pch == "SENDING" or pb == "SENDING"
             summaries.append(f"{account['label']}: ПЧ={pch}, ПБ={pb}")
         if not active_sends and not messages.is_processing_deletions:
-            audit.write("INFO", "terminal", "idle_report", "No send/delete action right now; " + "; ".join(summaries))
+            audit.write("INFO", "terminal", "idle_report", "Зараз немає дій відправки/видалення; " + "; ".join(summaries))
 
 
 def as_http_error(exc: Exception) -> HTTPException:
@@ -69,7 +73,7 @@ def as_http_error(exc: Exception) -> HTTPException:
         return HTTPException(404, str(exc).strip("'"))
     if isinstance(exc, (ValueError, TelegramUnavailable)):
         return HTTPException(400, str(exc))
-    return HTTPException(500, "Internal server error; see Logs for the non-sensitive error details")
+    return HTTPException(500, "Внутрішня помилка сервера; дивіться журнали для нечутливих деталей помилки")
 
 
 @asynccontextmanager
@@ -85,45 +89,87 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     telegram = TelegramService(config, audit, settings, accounts)
     chats = ChatManager(db, telegram, audit)
     messages = MessageManager(db, telegram, settings, audit)
-    scheduler = SchedulerRegistry(db, chats, messages, settings, audit, accounts)
+    telegram.messages = messages
+    scheduler = SchedulerRegistry(db, chats, messages, settings, audit, accounts, telegram)
     farm = FarmRegistry(db, chats, messages, audit, accounts)
     ps = PSRegistry(db, chats, messages, audit, accounts)
+    feed = FeedRegistry(db, chats, messages, audit, accounts, telegram)
     gemini = GeminiAssistant(config, db, settings, accounts, telegram, chats, messages, audit)
     keyword_reply = KeywordReplyAssistant(db, accounts, telegram, chats, messages, audit)
+    horse_rating = HorseRatingMonitor(db, accounts, telegram, audit)
+
+    # Centralized event handler for all incoming messages
+    async def on_new_message(event):
+        try:
+            account_id = getattr(event, "_account_id", None)
+            if account_id is None:
+                return
+
+            # Feed manager
+            await feed.handle_message(account_id, event)
+
+            # Gemini assistant
+            await gemini.handle_message(account_id, event)
+        except Exception as exc:
+            audit.write("ERROR", "events", "handler_error", f"Handler error: {type(exc).__name__}: {str(exc)}", account_id=account_id)
 
     async def synchronize_authorized_account(account_id: int) -> None:
-        # The first successful authorization imports every dialog automatically.
-        # Existing assignments are preserved by ChatManager.refresh_from_telegram.
+        # Перша успішна авторизація автоматично імпортує кожен діалог.
+        # Існуючі призначення зберігаються ChatManager.refresh_from_telegram.
         await chats.refresh_from_telegram(account_id)
-        await gemini.ensure_listener(account_id)
-        await keyword_reply.ensure_listener(account_id)
+
+    # Register centralized event handler
+    from telethon import events
+    telegram.add_event_handler(on_new_message, events.NewMessage(incoming=True))
 
     telegram.add_authorized_callback(synchronize_authorized_account)
     scheduler.initialize()
     farm.initialize()
     ps.initialize()
+    feed.initialize()
+    horse_rating.initialize()
     app.state.services = {
         "config": config, "db": db, "audit": audit, "settings": settings,
-        "accounts": accounts, "telegram": telegram, "chats": chats, "messages": messages, "scheduler": scheduler, "farm": farm, "ps": ps,
-        "gemini": gemini, "keyword_reply": keyword_reply,
+        "accounts": accounts, "telegram": telegram, "chats": chats, "messages": messages, "scheduler": scheduler, "farm": farm, "ps": ps, "feed": feed,
+        "gemini": gemini, "keyword_reply": keyword_reply, "horse_rating": horse_rating,
     }
-    # A session can already be authorized when the application is opened again.
-    # Import its dialogs once if this account has no local chat inventory yet.
-    for account in accounts.list():
+    # Сесія може бути вже авторизована, коли застосунок відкривається знову.
+    # Імпортувати його діалоги один раз, якщо цей акаунт ще не має локального інвентарю чатів.
+    account_list = accounts.list()
+    audit.write("INFO", "system", "accounts_list", f"Found {len(account_list)} accounts: {[a['id'] for a in account_list]}")
+    for account in account_list:
         account_id = account["id"]
         try:
             status = await telegram.status(account_id)
-            if status["authorized"] and not chats.list(account_id):
-                await synchronize_authorized_account(account_id)
+            audit.write("INFO", "system", "account_status", f"Account {account_id} status: authorized={status.get('authorized')}, auth_stage={status.get('auth_stage')}", account_id=account_id)
         except Exception as exc:
-            audit.write("WARNING", "chats", "startup_sync_failed", f"Initial chat import failed: {type(exc).__name__}", account_id=account_id)
-    audit.write("INFO", "system", "startup", "Telegram Scheduler started")
+            audit.write("WARNING", "system", "status_check_failed", f"Status check failed for account {account_id}: {type(exc).__name__}", account_id=account_id)
+            status = {"authorized": False, "auth_stage": "UNKNOWN"}
+        
+        # Consider account authorized if it has chats in the database
+        has_chats = bool(chats.list(account_id))
+        is_authorized = status.get("authorized") or has_chats
+        
+        if is_authorized:
+            try:
+                if not has_chats:
+                    await synchronize_authorized_account(account_id)
+                else:
+                    pass
+            except Exception as exc:
+                audit.write("WARNING", "chats", "startup_sync_failed", f"Початковий імпорт чатів не вдався: {type(exc).__name__}", account_id=account_id)
+
+    # Start centralized event listeners for all connected accounts
+    await telegram.start_listeners()
+    audit.write("INFO", "system", "startup", "Telegram Scheduler запущено")
     await messages.start()
     await scheduler.restore()
     await farm.restore()
     await ps.restore()
     await gemini.start()
     await keyword_reply.start()
+    await horse_rating.start()
+    feed.initialize()
     heartbeat_stop = asyncio.Event()
     heartbeat_task = asyncio.create_task(
         terminal_heartbeat(heartbeat_stop, accounts, scheduler, messages, audit, config.terminal_idle_report_seconds),
@@ -132,15 +178,17 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     try:
         yield
     finally:
-        audit.write("INFO", "system", "shutdown", "Graceful shutdown started")
+        audit.write("INFO", "system", "shutdown", "Початок коректного завершення")
         heartbeat_stop.set()
         await heartbeat_task
         await chats.shutdown()
         await farm.shutdown()
         await ps.shutdown()
+        await feed.shutdown()
         await scheduler.shutdown()
         await gemini.shutdown()
         await keyword_reply.shutdown()
+        await horse_rating.shutdown()
         await messages.stop()
         await telegram.disconnect()
         db.close()
@@ -169,8 +217,8 @@ async def status(request: Request):
     pb_assigned = sum(chat["pb_enabled"] for chat in chats)
     selected_for_mailings = sum(chat["pch_enabled"] or chat["pb_enabled"] for chat in chats)
 
-    # Keep the dashboard useful without introducing a browser-side data store:
-    # seven compact daily buckets are calculated from the durable message ledger.
+    # Зберегти корисність інформаційної панелі без введення сховища даних на стороні браузера:
+    # сім компактних денних кошиків розраховуються зі стійкої книги повідомлень.
     today = utcnow().date()
     days = [today - timedelta(days=offset) for offset in range(6, -1, -1)]
     activity_by_day = {day.isoformat(): {"sent": 0, "pch": 0, "pb": 0, "reply": 0, "ps": 0, "farm": 0} for day in days}
@@ -186,7 +234,7 @@ async def status(request: Request):
         sent_at = message.sent_at
         if sent_at.tzinfo is None:
             sent_at = sent_at.replace(tzinfo=timezone.utc)
-        # Convert to local time for bucket assignment
+        # Перетворити на місцевий час для призначення кошика
         bucket = activity_by_day.get(sent_at.astimezone().date().isoformat())
         if bucket is not None:
             bucket["sent"] += 1
@@ -295,7 +343,6 @@ async def auth_status(request: Request):
     services = application_services(request)
     account_id = selected_account_id(services)
     await services["gemini"].ensure_listener(account_id)
-    await services["keyword_reply"].ensure_listener(account_id)
     return await services["telegram"].status(account_id)
 
 
@@ -316,7 +363,6 @@ async def auth_code(payload: CodeLoginRequest, request: Request):
         result = await services["telegram"].submit_code(account_id, payload.code)
         if result["status"] == "AUTHORIZED":
             await services["gemini"].ensure_listener(account_id)
-            await services["keyword_reply"].ensure_listener(account_id)
         return result
     except Exception as exc:
         raise as_http_error(exc) from exc
@@ -330,7 +376,6 @@ async def auth_two_factor(payload: PasswordLoginRequest, request: Request):
         result = await services["telegram"].submit_password(account_id, payload.password)
         if result["status"] == "AUTHORIZED":
             await services["gemini"].ensure_listener(account_id)
-            await services["keyword_reply"].ensure_listener(account_id)
         return result
     except Exception as exc:
         raise as_http_error(exc) from exc
@@ -408,13 +453,13 @@ async def list_messages(request: Request, limit: int = Query(200, ge=1, le=1000)
 async def send_message(payload: ManualMessageRequest, request: Request):
     services = application_services(request)
     account_id = selected_account_id(services)
-    # PS and Farm are single-chat selections, so they only require the chat to be enabled
+    # PS і Farm - це вибори одного чату, тому вони вимагають лише, щоб чат був увімкнений
     if payload.message_type in {"PCH", "PB"}:
         if not services["chats"].is_currently_eligible(account_id, payload.chat_id, payload.message_type):
-            raise HTTPException(400, "Select this enabled chat in the corresponding manual mailing list first")
+            raise HTTPException(400, "Спочатку виберіть цей увімкнений чат у відповідному списку ручної розсилки")
     else:
         if not services["chats"].is_currently_eligible(account_id, payload.chat_id):
-            raise HTTPException(400, "Select this enabled chat first")
+            raise HTTPException(400, "Спочатку виберіть цей увімкнений чат")
     try:
         message_id = await services["messages"].send(account_id, payload.chat_id, payload.text, payload.message_type)
         return {"telegram_message_id": message_id, "status": "DELETE_PENDING"}
@@ -439,7 +484,7 @@ async def farm_update(payload: FarmSettingsRequest, request: Request):
     try:
         services = application_services(request)
         return await services["farm"].for_account(selected_account_id(services)).configure(
-            chat_id=payload.chat_id, text=payload.text, enabled=payload.enabled,
+            chat_id=payload.chat_id, interval_hours=payload.interval_hours, enabled=payload.enabled,
         )
     except Exception as exc:
         raise as_http_error(exc) from exc
@@ -462,10 +507,27 @@ async def ps_update(payload: PSSettingsRequest, request: Request):
         raise as_http_error(exc) from exc
 
 
+@app.get("/api/feed")
+async def feed_status(request: Request):
+    services = application_services(request)
+    return services["feed"].for_account(selected_account_id(services)).get_state()
+
+
+@app.put("/api/feed")
+async def feed_update(payload: FeedSettingsRequest, request: Request):
+    try:
+        services = application_services(request)
+        return await services["feed"].for_account(selected_account_id(services)).configure(
+            username_to_feed=payload.username_to_feed, text=payload.text, enabled=payload.enabled,
+        )
+    except Exception as exc:
+        raise as_http_error(exc) from exc
+
+
 def normalized_kind(kind: str) -> str:
     kind = kind.upper()
     if kind not in {"PCH", "PB"}:
-        raise HTTPException(404, "Scheduler must be pch or pb")
+        raise HTTPException(404, "Планувальник має бути pch або pb")
     return kind
 
 
@@ -558,6 +620,24 @@ async def put_gemini_settings(payload: GeminiSettingsRequest, request: Request):
         if result["enabled"]:
             await services["gemini"].ensure_listener(account_id)
         return result
+    except Exception as exc:
+        raise as_http_error(exc) from exc
+
+
+@app.get("/api/horse-rating")
+async def get_horse_rating_status(request: Request):
+    services = application_services(request)
+    return services["horse_rating"].for_account(selected_account_id(services)).get_state()
+
+
+@app.put("/api/horse-rating")
+async def put_horse_rating_settings(payload: dict, request: Request):
+    try:
+        services = application_services(request)
+        account_id = selected_account_id(services)
+        enabled = payload.get("enabled", False)
+        services["horse_rating"].for_account(account_id).set_enabled(enabled)
+        return {"status": "UPDATED", "enabled": enabled}
     except Exception as exc:
         raise as_http_error(exc) from exc
 

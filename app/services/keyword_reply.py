@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections import defaultdict
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from telethon import events
@@ -18,17 +18,17 @@ from .telegram_client import TelegramService, TelegramUnavailable
 
 TRIGGER_WORDS = {"ом", "оч", "об"}
 REPLY_TEXT = "Вкрасти"
-ACCOUNT_COOLDOWN_SECONDS = 60 + 22
-USER_COOLDOWN_SECONDS = 60 * 60 + 22
+ACCOUNT_COOLDOWN_SECONDS = 60
+USER_COOLDOWN_SECONDS = 60 * 60
 GLOBAL_COOLDOWN_SECONDS = 60
 
 
 class KeywordReplyAssistant:
-    """Exact short replies in explicitly enabled manual groups.
+    """Точні короткі відповіді в явно увімкнених ручних групах.
 
-    The account-wide minute limit protects the sender account from bursts across
-    groups. The second limit prevents the same Telegram sender from receiving a
-    reply again for one hour, even after the account-level minute has elapsed.
+    Хвилинне обмеження для всього акаунту захищає акаунт відправника від сплесків
+    по групах. Друге обмеження запобігає тому, що той самий відправник Telegram отримає
+    відповідь знову протягом години, навіть після закінчення хвилини на рівні акаунту.
     """
 
     def __init__(
@@ -47,13 +47,13 @@ class KeywordReplyAssistant:
         self._initialize_global_state()
 
     def _initialize_global_state(self) -> None:
-        """Ensure the global state record exists."""
+        """Забезпечити існування запису глобального стану."""
         with self.db.session() as session:
             if session.get(KeywordReplyGlobalState, 1) is None:
                 session.add(KeywordReplyGlobalState(id=1))
 
     def _accounts_with_keyword_reply_enabled(self) -> int:
-        """Count how many accounts have at least one chat with keyword reply enabled."""
+        """Порахувати, скільки акаунтів мають хоча б один чат з увімкненою відповіддю на ключові слова."""
         count = 0
         for account in self.accounts.list():
             if self.chats.has_keyword_reply_enabled(account["id"]):
@@ -61,7 +61,7 @@ class KeywordReplyAssistant:
         return count
 
     def _should_apply_global_cooldown(self) -> bool:
-        """Global cooldown applies when 2 or more accounts have keyword reply enabled."""
+        """Глобальний cooldown застосовується, коли 2 або більше акаунтів мають увімкнену відповідь на ключові слова."""
         return self._accounts_with_keyword_reply_enabled() >= 2
 
     async def ensure_listener(self, account_id: int) -> None:
@@ -103,7 +103,7 @@ class KeywordReplyAssistant:
         return max(0, int(remaining))
 
     async def handle_incoming(self, account_id: int, event: Any) -> bool:
-        """Return whether a real reply was sent; useful for deterministic tests."""
+        """Повернути, чи була відправлена реальна відповідь; корисно для детермінованих тестів."""
         text = (getattr(event, "raw_text", "") or "").strip().casefold()
         if text not in TRIGGER_WORDS:
             return False
@@ -114,17 +114,17 @@ class KeywordReplyAssistant:
         if not chat_id or not source_message_id or not self.chats.is_keyword_reply_enabled(account_id, chat_id):
             return False
         if not sender_id:
-            # Anonymous senders are deliberately skipped: we cannot truthfully
-            # enforce the requested per-user hourly protection without an ID.
+            # Анонімні відправники навмисно пропускаються: ми не можемо правдиво
+            # забезпечити запитуваний погодинний захист для кожного користувача без ID.
             self.audit.write(
                 "INFO", "keyword_reply", "sender_unavailable",
-                "Keyword reply skipped because Telegram did not expose a sender ID",
+                "Відповідь на ключові слова пропущено, оскільки Telegram не надав ID відправника",
                 account_id=account_id, chat_id=chat_id,
             )
             return False
         sender_id = int(sender_id)
 
-        # Check global cooldown if 2+ accounts have keyword reply enabled
+        # Перевірити глобальний cooldown, якщо 2+ акаунти мають увімкнену відповідь на ключові слова
         apply_global = self._should_apply_global_cooldown()
         if apply_global:
             async with self._global_lock:
@@ -137,7 +137,7 @@ class KeywordReplyAssistant:
                 if global_remaining:
                     self.audit.write(
                         "INFO", "keyword_reply", "global_rate_limited",
-                        f"Keyword reply skipped; global cooldown has {global_remaining} seconds left (2+ accounts enabled)",
+                        f"Відповідь на ключові слова пропущено; глобальний cooldown має {global_remaining} секунд залишилося (2+ акаунти увімкнено)",
                         account_id=account_id, chat_id=chat_id,
                     )
                     return False
@@ -163,8 +163,8 @@ class KeywordReplyAssistant:
                 if account_remaining or user_remaining:
                     previous_account = previous_user = previous_global = None
                 else:
-                    # Claim both cooldowns before Telegram I/O. This prevents a
-                    # burst of updates from producing duplicate replies.
+                    # Заняти обидва cooldown перед Telegram I/O. Це запобігає
+                    # сплеску оновлень від створення дублікатів відповідей.
                     previous_account = account_state.last_sent_at
                     previous_user = user_state.last_sent_at
                     previous_global = None
@@ -178,14 +178,14 @@ class KeywordReplyAssistant:
             if account_remaining:
                 self.audit.write(
                     "INFO", "keyword_reply", "account_rate_limited",
-                    f"Keyword reply skipped; account cooldown has {account_remaining} seconds left",
+                    f"Відповідь на ключові слова пропущено; cooldown акаунту має {account_remaining} секунд залишилося",
                     account_id=account_id, chat_id=chat_id,
                 )
                 return False
             if user_remaining:
                 self.audit.write(
                     "INFO", "keyword_reply", "user_rate_limited",
-                    f"Keyword reply skipped; sender cooldown has {user_remaining} seconds left",
+                    f"Відповідь на ключові слова пропущено; cooldown відправника має {user_remaining} секунд залишилося",
                     account_id=account_id, chat_id=chat_id,
                 )
                 return False
@@ -195,7 +195,7 @@ class KeywordReplyAssistant:
                     account_id, chat_id, REPLY_TEXT, "REPLY", reply_to_message_id=int(source_message_id),
                 )
             except Exception as exc:
-                # Release only the claims made for this particular failed send.
+                # Звільнити лише претензії, зроблені для цього конкретного невдалого відправлення.
                 with self.db.session() as session:
                     account_state = session.get(KeywordReplyState, account_id)
                     user_state = session.get(KeywordReplyUserState, (account_id, sender_id))
@@ -208,7 +208,7 @@ class KeywordReplyAssistant:
                         if global_state and global_state.last_sent_at == now:
                             global_state.last_sent_at = previous_global
                 self.audit.write(
-                    "ERROR", "keyword_reply", "send_failed", f"Keyword reply failed: {type(exc).__name__}",
+                    "ERROR", "keyword_reply", "send_failed", f"Відповідь на ключові слова не вдалася: {type(exc).__name__}",
                     account_id=account_id, chat_id=chat_id,
                 )
                 return False
@@ -221,6 +221,10 @@ class KeywordReplyAssistant:
     async def start(self) -> None:
         for account in self.accounts.list():
             await self.ensure_listener(account["id"])
+
+    async def handle_message(self, account_id: int, event: Any) -> None:
+        # Handlers are local now, no-op for centralized dispatch
+        pass
 
     async def shutdown(self) -> None:
         for account_id, handler in list(self._handlers.items()):

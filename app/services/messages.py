@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import timedelta
-from typing import Any
+from typing import Any, Optional
 
 from sqlalchemy import select
 
@@ -14,8 +14,8 @@ from .telegram_client import TelegramService
 
 
 def message_to_dict(message: OutboundMessage, task: DeleteTask | None = None) -> dict[str, Any]:
-    # A cancelled legacy task is retained for audit/recovery history but is no
-    # longer a deletion schedule from the user's perspective.
+    # Скасована застаріла задача зберігається для історії аудиту/відновлення, але більше
+    # не є розкладом видалення з точки зору користувача.
     delete_scheduled = task is not None and task.status != "CANCELLED"
     return {
         "id": message.id, "account_id": message.account_id, "chat_id": message.chat_id, "telegram_message_id": message.telegram_message_id,
@@ -40,7 +40,7 @@ class MessageManager:
 
     @property
     def is_processing_deletions(self) -> bool:
-        """Used only for a truthful terminal idle report."""
+        """Використовується тільки для правдивого звіту про простій в терміналі."""
         return bool(self._active_delete_tasks)
 
     def list(self, account_id: int | None = None, limit: int = 200) -> list[dict[str, Any]]:
@@ -54,10 +54,38 @@ class MessageManager:
     async def send(
         self, account_id: int, chat_id: int, text: str, message_type: str,
         reply_to_message_id: int | None = None, *, schedule_deletion: bool = True,
-    ) -> int:
-        message_id = await self.telegram.send_message(account_id, chat_id, text, reply_to_message_id)
-        # Keep the existing non-null database column compatible with upgrades.
-        # The timestamp is not exposed when no DeleteTask exists.
+    ) -> int:  # Returns 0 on failure, actual message_id on success
+        max_send_retries = 3
+        last_error = None
+        message_id = None
+        
+        for attempt in range(max_send_retries):
+            try:
+                message_id = await self.telegram.send_message(account_id, chat_id, text, reply_to_message_id)
+                break
+            except Exception as exc:
+                last_error = exc
+                if attempt < max_send_retries - 1:
+                    await asyncio.sleep(2 ** attempt)  # Exponential backoff: 2s, 4s
+                    continue
+                # All retries failed - record as FAILED without DeleteTask
+                with self.db.session() as session:
+                    outbound = OutboundMessage(
+                        account_id=account_id, chat_id=chat_id, telegram_message_id=0, message_type=message_type,
+                        body=text, delete_at=utcnow(), status="FAILED",
+                    )
+                    outbound.error = type(last_error).__name__
+                    session.add(outbound)
+                    session.flush()
+                self.audit.write(
+                    "ERROR", "messages", "send_failed",
+                    f"Повідомлення не вдалося надіслати після {max_send_retries} спроб: {type(last_error).__name__}",
+                    account_id=account_id, mailing_type=message_type, chat_id=chat_id,
+                )
+                return 0  # Return 0 to indicate failure
+        
+        # Зберігаємо існуючу не-null колонку бази даних сумісно з оновленнями.
+        # Timestamp не експонується, коли DeleteTask не існує.
         delete_at = utcnow() + timedelta(seconds=int(self.settings.get("delete_after_seconds"))) if schedule_deletion else utcnow()
         with self.db.session() as session:
             outbound = OutboundMessage(
@@ -70,16 +98,16 @@ class MessageManager:
                 session.add(DeleteTask(outbound_message_id=outbound.id, due_at=delete_at, status="PENDING"))
         self.audit.write(
             "INFO", "messages", "sent",
-            "Message sent and deletion scheduled" if schedule_deletion else "Message sent; deletion disabled",
+            "Повідомлення надіслано та видалення заплановано" if schedule_deletion else "Повідомлення надіслано; видалення вимкнено",
             account_id=account_id, mailing_type=message_type, chat_id=chat_id, message_id=message_id,
         )
         return message_id
 
     async def start(self) -> None:
         self._stop_event.clear()
-        # Gemini responses, Farm and PS messages are meant to remain visible.
-        # Cancel legacy delete tasks created before those policies existed.
-        persistent_message_types = {"GEMINI", "FARM", "PS"}
+        # Відповіді Gemini, повідомлення Ферми, ПС та Вкрасти повинні залишатися видимими.
+        # Скасуйте застарілі задачі видалення, створені до існування цих політик.
+        persistent_message_types = {"GEMINI", "FARM", "PS", "REPLY"}
         cancelled_persistent_tasks = 0
         with self.db.session() as session:
             persistent_tasks = session.scalars(
@@ -94,14 +122,14 @@ class MessageManager:
                 if message:
                     message.status = "SENT"
                 cancelled_persistent_tasks += 1
-            # A process may stop after claiming another task but before
-            # calling Telegram. Return only that recoverable state to the queue.
+            # Процес може зупинитися після отримання іншої задачі, але перед
+            # викликом Telegram. Повертаємо лише відновлюваний стан у чергу.
             for task in session.scalars(select(DeleteTask).where(DeleteTask.status == "PROCESSING")).all():
                 task.status = "PENDING"
         if cancelled_persistent_tasks:
             self.audit.write(
                 "INFO", "messages", "persistent_delete_cancelled",
-                f"Cancelled deletion for {cancelled_persistent_tasks} existing Gemini or Farm message(s)",
+                f"Скасовано видалення для {cancelled_persistent_tasks} існуючих повідомлень Gemini або Ферми",
             )
         if self._worker is None or self._worker.done():
             self._worker = asyncio.create_task(self._run(), name="delete-scheduler")
@@ -115,17 +143,17 @@ class MessageManager:
                 self._worker.cancel()
 
     async def _run(self) -> None:
-        self.audit.write("INFO", "delete_scheduler", "started", "Delete scheduler started")
+        self.audit.write("INFO", "delete_scheduler", "started", "Планувальник видалення запущено")
         while not self._stop_event.is_set():
             try:
                 await self.process_due()
             except Exception as exc:
-                self.audit.write("ERROR", "delete_scheduler", "loop_error", f"Delete scheduler recovered from {type(exc).__name__}")
+                self.audit.write("ERROR", "delete_scheduler", "loop_error", f"Планувальник видалення відновлено від {type(exc).__name__}")
             try:
                 await asyncio.wait_for(self._stop_event.wait(), timeout=1)
             except asyncio.TimeoutError:
                 pass
-        self.audit.write("INFO", "delete_scheduler", "stopped", "Delete scheduler stopped")
+        self.audit.write("INFO", "delete_scheduler", "stopped", "Планувальник видалення зупинено")
 
     async def process_due(self) -> None:
         async with self._processing_lock:
@@ -156,7 +184,7 @@ class MessageManager:
             message = session.get(OutboundMessage, task.outbound_message_id)
             if message is None:
                 task.status = "FAILED"
-                task.last_error = "Outbound message record missing"
+                task.last_error = "Запис вихідного повідомлення відсутній"
                 return
             account_id, chat_id, telegram_id, message_db_id = message.account_id, message.chat_id, message.telegram_message_id, message.id
             message.status = "CHECKING"
@@ -169,7 +197,7 @@ class MessageManager:
                     if task and message:
                         task.status = "ALREADY_DELETED"
                         message.status = "ALREADY_DELETED"
-                self.audit.write("INFO", "messages", "already_deleted", "Message was already absent before deletion", account_id=account_id, chat_id=chat_id, message_id=telegram_id)
+                self.audit.write("INFO", "messages", "already_deleted", "Повідомлення вже було відсутнє перед видаленням", account_id=account_id, chat_id=chat_id, message_id=telegram_id)
                 return
             with self.db.session() as session:
                 message = session.get(OutboundMessage, message_db_id)
@@ -182,9 +210,9 @@ class MessageManager:
                 if task and message:
                     task.status = "DELETED"
                     message.status = "DELETED"
-            self.audit.write("INFO", "messages", "deleted", "Message deleted", account_id=account_id, chat_id=chat_id, message_id=telegram_id)
+            self.audit.write("INFO", "messages", "deleted", "Повідомлення видалено", account_id=account_id, chat_id=chat_id, message_id=telegram_id)
         except Exception as exc:
-            max_retries = int(self.settings.get("max_delete_retries"))
+            # Retry deletion indefinitely for common errors (database locked, network issues)
             with self.db.session() as session:
                 task = session.get(DeleteTask, task_id)
                 message = session.get(OutboundMessage, message_db_id)
@@ -192,11 +220,14 @@ class MessageManager:
                     task.attempts += 1
                     task.last_error = type(exc).__name__
                     message.error = type(exc).__name__
-                    if task.attempts > max_retries:
+                    # Ліміт retry - 100 спроб, потім FAILED
+                    if task.attempts >= 100:
                         task.status = "FAILED"
                         message.status = "FAILED"
+                        self.audit.write("WARNING", "messages", "delete_failed", f"Видалення не вдалося після {task.attempts} спроб: {type(exc).__name__}", account_id=account_id, chat_id=chat_id, message_id=telegram_id)
                     else:
+                        # Retry deletion - set to PENDING with short delay
                         task.status = "PENDING"
-                        task.due_at = utcnow() + timedelta(seconds=min(60, 5 * task.attempts))
+                        task.due_at = utcnow() + timedelta(seconds=2)  # Retry after 2 seconds
                         message.status = "DELETE_PENDING"
-            self.audit.write("WARNING", "messages", "delete_retry", f"Message deletion attempt failed: {type(exc).__name__}", account_id=account_id, chat_id=chat_id, message_id=telegram_id)
+                        self.audit.write("WARNING", "messages", "delete_retry", f"Спроба видалення повідомлення не вдалася: {type(exc).__name__}, retry #{task.attempts} in 2 seconds", account_id=account_id, chat_id=chat_id, message_id=telegram_id)

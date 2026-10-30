@@ -7,6 +7,6 @@ if ! command -v python3 >/dev/null 2>&1; then
 fi
 
 python3 -m venv .venv
-.venv/bin/python -m pip install --upgrade pip
+.venv/bin/python -m pip install --upgrade pip || true
 .venv/bin/python -m pip install -r requirements.txt
 echo "Installed. Copy .env.example to .env, add API_ID/API_HASH, then run ./start.sh."

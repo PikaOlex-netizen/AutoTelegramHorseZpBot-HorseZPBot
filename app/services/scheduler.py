@@ -15,13 +15,14 @@ from .chats import ChatManager
 from .messages import MessageManager
 from .settings import SettingsService
 from .accounts import AccountService
+from .telegram_client import TelegramService
 
 
 VALID_TYPES = {"PCH", "PB"}
 
 
 def distribute_evenly(chat_ids: list[int], group_count: int) -> list[list[int]]:
-    """Deterministically split a snapshot, with group sizes differing by at most 1."""
+    """Детерміновано розділити знімок, розміри груп відрізняються не більше ніж на одиницю."""
     if group_count < 1:
         raise ValueError("group_count must be at least one")
     quotient, remainder = divmod(len(chat_ids), group_count)
@@ -43,7 +44,7 @@ def _future(value: datetime | None) -> bool:
 
 
 def state_to_dict(state: SchedulerState, kind: str, account_id: int, eligible_count: int | None = None) -> dict[str, Any]:
-    # Convert UTC to local time for display
+    # Перетворити UTC на місцевий час для відображення
     def to_local(dt):
         if dt is None:
             return None
@@ -62,10 +63,11 @@ def state_to_dict(state: SchedulerState, kind: str, account_id: int, eligible_co
 
 
 class MailingScheduler:
-    """Two independent durable schedulers; their plan is snapshotted at Start."""
+    """Два незалежних стійких планувальника; їх план знімається при Start."""
 
     def __init__(
-        self, db: Database, chats: ChatManager, messages: MessageManager, settings: SettingsService, audit: AuditLog, account_id: int = 1,
+        self, db: Database, chats: ChatManager, messages: MessageManager, settings: SettingsService, audit: AuditLog,
+        account_id: int = 1, telegram: TelegramService | None = None,
     ) -> None:
         self.db = db
         self.chats = chats
@@ -73,6 +75,7 @@ class MailingScheduler:
         self.settings = settings
         self.audit = audit
         self.account_id = account_id
+        self.telegram = telegram
         self._tasks: dict[str, asyncio.Task[None]] = {}
         self._wake: dict[str, asyncio.Event] = {kind: asyncio.Event() for kind in VALID_TYPES}
         self._locks: dict[str, asyncio.Lock] = {kind: asyncio.Lock() for kind in VALID_TYPES}
@@ -109,11 +112,11 @@ class MailingScheduler:
             setting = session.get(Setting, key)
             if setting:
                 return setting.value
-            # Account 1 keeps a prior single-account template after upgrade.
+            # Акаунт 1 зберігає попередній шаблон одиночного акаунту після оновлення.
             legacy = session.get(Setting, f"{kind.lower()}_template") if self.account_id == 1 else None
             if legacy:
                 return legacy.value
-            # Default text for PB and PCH
+            # Текст за замовчуванням для ПБ та ПЧ
             if kind == "PB":
                 return "пограбувати банк"
             if kind == "PCH":
@@ -223,16 +226,18 @@ class MailingScheduler:
             return self.get_state(kind)
 
     async def restore(self) -> None:
-        """Continue persisted work without recreating a plan or resending completed deliveries."""
+        """Продовжити збережену роботу без recreation плану або повторної відправки завершених доставок."""
         self._shutting_down = False
+        # Stagger restores to avoid all accounts starting at once
+        await asyncio.sleep(self.account_id * 0.5)  # 0.5s delay per account
         for kind in VALID_TYPES:
             with self.db.session() as session:
                 state = session.get(SchedulerState, self._state_key(kind))
                 assert state is not None
                 if state.status == "SENDING":
-                    # A mid-group shutdown resumes only delivery rows still PENDING.
+                    # Зупинка посеред групи відновлює лише рядки доставки, що ще PENDING.
                     state.status = "RUNNING"
-                    state.next_group_at = utcnow()
+                    # Keep existing next_group_at to continue where it left off
                 should_restore = state.enabled and state.status in {"RUNNING", "WAITING", "CYCLE_WAITING"}
             if should_restore:
                 self.audit.write("INFO", "scheduler", "restored", f"{kind} scheduler state restored", account_id=self.account_id, mailing_type=kind)
@@ -241,7 +246,12 @@ class MailingScheduler:
     def _ensure_runner(self, kind: str) -> None:
         task = self._tasks.get(kind)
         if task is None or task.done():
-            self._tasks[kind] = asyncio.create_task(self._run(kind), name=f"{kind.lower()}-scheduler")
+            # Clear done task to avoid creating duplicate
+            if task and task.done():
+                self._tasks.pop(kind, None)
+            # Double-check after clearing to prevent race condition
+            if kind not in self._tasks:
+                self._tasks[kind] = asyncio.create_task(self._run(kind), name=f"{kind.lower()}-scheduler-{self.account_id}")
 
     async def _run(self, kind: str) -> None:
         while not self._shutting_down:
@@ -253,11 +263,35 @@ class MailingScheduler:
                 if status in {"PAUSED", "PAUSED_CYCLE"}:
                     await self._wait(kind, 30)
                     continue
+
+                # Затримка між ПЧ і ПБ
+                if kind == "PB":
+                    try:
+                        all_settings = self.settings.get_all()
+                        pch_delay = int(all_settings.get("pch_pb_delay_seconds", 0))
+                        if pch_delay > 0:
+                            pch_state = self.get_state("PCH")
+                            if pch_state and isinstance(pch_state, dict):
+                                pch_last_at = pch_state.get("last_group_completed_at")
+                                if pch_last_at and isinstance(pch_last_at, str):
+                                    pch_last_dt = datetime.fromisoformat(pch_last_at)
+                                    if pch_last_dt.tzinfo is None:
+                                        pch_last_dt = pch_last_dt.replace(tzinfo=timezone.utc)
+                                    elapsed = (utcnow() - pch_last_dt).total_seconds()
+                                    if elapsed < pch_delay:
+                                        wait_time = pch_delay - elapsed
+                                        self.audit.write("INFO", "scheduler", "pch_pb_delay", f"PB waiting {wait_time}s after PCH", account_id=self.account_id, mailing_type=kind)
+                                        await self._wait(kind, wait_time)
+                                        continue
+                    except Exception as e:
+                        # Ігнорувати помилки при перевірці PCH state
+                        pass
+
                 next_value = state["next_group_at"]
                 if next_value:
                     next_at = datetime.fromisoformat(next_value)
                     if _future(next_at):
-                        # Convert both to UTC for comparison
+                        # Перетворити обидва в UTC для порівняння
                         if next_at.tzinfo is None:
                             next_at = next_at.replace(tzinfo=timezone.utc)
                         utc_now = utcnow()
@@ -271,8 +305,8 @@ class MailingScheduler:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                # A malformed legacy timestamp, a transient database error, or a
-                # Telegram-side exception must not permanently kill PЧ/ПБ.
+                # Спотворений застарілий timestamp, тимчасова помилка бази даних або
+                # виключення на стороні Telegram не повинні назавжди вбивати ПЧ/ПБ.
                 with self.db.session() as session:
                     state = session.get(SchedulerState, self._state_key(kind))
                     if state and state.enabled:
@@ -312,7 +346,7 @@ class MailingScheduler:
                 state.last_group_started_at = utcnow()
             self.audit.write("INFO", "scheduler", "group_started", f"{kind} group {group} started", account_id=self.account_id, mailing_type=kind)
 
-        # Fetching every delivery again after a restart means SENT rows are never duplicated.
+        # Отримання кожної доставки знову після перезапуску означає, що рядки SENT ніколи не дублюються.
         with self.db.session() as session:
             delivery_ids = list(session.scalars(
                 select(SchedulerDelivery.id).where(
@@ -332,7 +366,7 @@ class MailingScheduler:
                 assert state is not None
                 if state.status in {"PAUSED", "STOPPED"} or not state.enabled:
                     return
-                # Do not advance a group if an interruption left a PENDING record.
+                # Не переходити до наступної групи, якщо перерва залишила запис PENDING.
                 pending = session.scalar(select(SchedulerDelivery.id).where(
                     SchedulerDelivery.account_id == self.account_id,
                     SchedulerDelivery.run_id == state.run_id, SchedulerDelivery.mailing_type == kind,
@@ -345,16 +379,16 @@ class MailingScheduler:
                 completed_group = state.current_group
                 state.last_group_completed_at = utcnow()
                 if completed_group >= state.total_groups:
-                    # Keep a durable one-hour cadence between the last group of
-                    # this cycle and the first group of the next. This makes a
-                    # PCH target recur at most every 6 group intervals and PB at
-                    # most every 12 (with the defaults), never back-to-back.
+                    # Зберігати стійкий годинний ритм між останньою групою
+                    # цього циклу та першою групою наступного. Це робить
+                    # ціль ПЧ повторюваною не частіше ніж кожні 6 інтервалів груп, а ПБ —
+                    # не частіше ніж кожні 12 (за замовчуванням), ніколи підряд.
                     group_delay = int(self.settings.get("group_delay_seconds"))
                     minimum_repeat = self._minimum_repeat_seconds(kind)
-                    # The first target in a new cycle has already waited through
-                    # total_groups - 1 regular intervals. Add enough time after
-                    # the last group to enforce 6h for PCH / 12h for PB even if
-                    # the number of groups is later changed in Settings.
+                    # Перша ціль у новому циклі вже чекала через
+                    # total_groups - 1 звичайних інтервалів. Додайте достатньо часу після
+                    # останньої групи, щоб забезпечити 6 год для ПЧ / 12 год для ПБ, навіть якщо
+                    # кількість груп пізніше змінена в Settings.
                     cycle_wait = max(group_delay, minimum_repeat - ((state.total_groups - 1) * group_delay))
                     repeat_wait_seconds = cycle_wait
                     state.current_group = 1
@@ -378,10 +412,10 @@ class MailingScheduler:
                 self.audit.write("INFO", "scheduler", "waiting", f"{kind} waiting before group {completed_group + 1}", account_id=self.account_id, mailing_type=kind)
 
     async def _begin_next_cycle(self, kind: str) -> None:
-        """Build the next durable snapshot after the completed-cycle delay.
+        """Побудувати наступний стійкий знімок після затримки завершеного циклу.
 
-        Manual add/remove operations made during a cycle land here, never in the
-        partly completed one.  Each cycle gets a fresh run id and delivery ledger.
+        Ручні операції додавання/видалення, зроблені під час циклу, потрапляють сюди, ніколи в
+        частково завершений. Кожен цикл отримує свіжий run id та книгу доставки.
         """
         template = self.get_template(kind).strip()
         async with self._locks[kind]:
@@ -426,7 +460,7 @@ class MailingScheduler:
             if delivery is None or delivery.status != "PENDING":
                 return
             chat_id = delivery.chat_id
-        # A chat removed from this mailing before its turn is skipped.
+        # Чат, видалений з цієї розсилки перед його чергою, пропускається.
         if not self.chats.is_currently_eligible(self.account_id, chat_id, kind):
             with self.db.session() as session:
                 delivery = session.get(SchedulerDelivery, delivery_id)
@@ -454,7 +488,7 @@ class MailingScheduler:
             self.audit.write("ERROR", "scheduler", "message_failed", f"Message send failed: {type(exc).__name__}", account_id=self.account_id, mailing_type=kind, chat_id=chat_id)
 
     async def shutdown(self) -> None:
-        """Stop workers without overwriting durable run status; startup can recover it."""
+        """Зупинити виконавців без перезапису стійкого стану запуску; запуск може відновити його."""
         self._shutting_down = True
         for event in self._wake.values():
             event.set()
@@ -477,11 +511,11 @@ class MailingScheduler:
 
 
 class SchedulerRegistry:
-    """Owns independent PCH/PB runners for every active Telegram account."""
+    """Володіє незалежними виконавцями ПЧ/ПБ для кожного активного Telegram-акаунту."""
 
     def __init__(
         self, db: Database, chats: ChatManager, messages: MessageManager, settings: SettingsService,
-        audit: AuditLog, accounts: AccountService,
+        audit: AuditLog, accounts: AccountService, telegram: TelegramService | None = None,
     ) -> None:
         self.db = db
         self.chats = chats
@@ -489,6 +523,7 @@ class SchedulerRegistry:
         self.settings = settings
         self.audit = audit
         self.accounts = accounts
+        self.telegram = telegram
         self._schedulers: dict[int, MailingScheduler] = {}
 
     def for_account(self, account_id: int) -> MailingScheduler:
@@ -496,7 +531,10 @@ class SchedulerRegistry:
             raise KeyError(f"Account {account_id} does not exist")
         scheduler = self._schedulers.get(account_id)
         if scheduler is None:
-            scheduler = MailingScheduler(self.db, self.chats, self.messages, self.settings, self.audit, account_id)
+            scheduler = MailingScheduler(
+                self.db, self.chats, self.messages, self.settings, self.audit,
+                account_id, telegram=self.telegram,
+            )
             scheduler.initialize()
             self._schedulers[account_id] = scheduler
         return scheduler

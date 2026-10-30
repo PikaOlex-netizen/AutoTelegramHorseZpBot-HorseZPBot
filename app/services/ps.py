@@ -24,7 +24,7 @@ def _future(value: datetime | None) -> bool:
 
 
 class PSScheduler:
-    """Durable repeating sender with one selected destination per account (23h 58m interval)."""
+    """Стійкий повторюваний відправник з однією вибраною адресою для кожного акаунту (інтервал 23г 58хв)."""
 
     def __init__(
         self, db: Database, chats: ChatManager, messages: MessageManager,
@@ -49,14 +49,14 @@ class PSScheduler:
         with self.db.session() as session:
             state = session.get(PSState, self.account_id)
             assert state is not None
-            # Convert UTC to local time for display
+            # Перетворити UTC на місцевий час для відображення
             def to_local(dt):
                 if dt is None:
                     return None
                 if dt.tzinfo is None:
                     dt = dt.replace(tzinfo=timezone.utc)
                 return dt.astimezone().isoformat()
-            # Default text for PS
+            # Текст за замовчуванням для PS
             message_text = state.message_text or "пограбувати світ"
             return {
                 "account_id": self.account_id,
@@ -99,7 +99,7 @@ class PSScheduler:
                     state.next_send_at = None
             self.audit.write(
                 "INFO", "ps", "configured",
-                "PS schedule enabled" if enabled else "PS schedule stopped",
+                "Розклад PS увімкнено" if enabled else "Розклад PS зупинено",
                 account_id=self.account_id, chat_id=chat_id,
             )
             if enabled:
@@ -117,7 +117,7 @@ class PSScheduler:
                 state.next_send_at = utcnow()
             should_restore = state.enabled and state.status in {"WAITING", "SENDING"}
         if should_restore:
-            self.audit.write("INFO", "ps", "restored", "PS schedule restored after restart", account_id=self.account_id)
+            self.audit.write("INFO", "ps", "restored", "Розклад PS відновлено після перезапуску", account_id=self.account_id)
             self._ensure_runner()
 
     def _ensure_runner(self) -> None:
@@ -153,7 +153,7 @@ class PSScheduler:
                         state.status = "WAITING"
                         state.next_send_at = utcnow() + timedelta(seconds=60)
                         state.last_error = type(exc).__name__
-                self.audit.write("ERROR", "ps", "worker_failed", f"PS worker recovered from {type(exc).__name__}", account_id=self.account_id)
+                self.audit.write("ERROR", "ps", "worker_failed", f"PS worker відновлено від {type(exc).__name__}", account_id=self.account_id)
                 await self._wait(60)
 
     async def _send_once(self) -> None:
@@ -169,20 +169,20 @@ class PSScheduler:
                     state.enabled = False
                     state.status = "STOPPED"
                     state.next_send_at = None
-                    state.last_error = "Selected chat is no longer active"
+                    state.last_error = "Вибраний чат більше не активний"
                     selected_chat_unavailable = True
                 else:
                     state.status = "SENDING"
             if selected_chat_unavailable:
                 self.audit.write(
                     "WARNING", "ps", "chat_unavailable",
-                    "PS stopped because its selected chat was removed from the working list",
+                    "PS зупинено, оскільки його вибраний чат було видалено з робочого списку",
                     account_id=self.account_id, chat_id=chat_id,
                 )
                 return
         try:
-            # PS is a repeating presence in the selected chat, so its messages
-            # must stay visible.  PCH/PB keep their independent deletion policy.
+            # PS - це повторювана присутність у вибраному чаті, тому його повідомлення
+            # повинні залишатися видимими. PCH/PB зберігають свою незалежну політику видалення.
             message_id = await self.messages.send(
                 self.account_id, chat_id, text, "PS", schedule_deletion=False,
             )
@@ -193,7 +193,7 @@ class PSScheduler:
                     state.status = "WAITING"
                     state.next_send_at = utcnow() + timedelta(seconds=60)
                     state.last_error = type(exc).__name__
-            self.audit.write("ERROR", "ps", "send_failed", f"PS message failed: {type(exc).__name__}", account_id=self.account_id, chat_id=chat_id)
+            self.audit.write("ERROR", "ps", "send_failed", f"Повідомлення PS не вдалося: {type(exc).__name__}", account_id=self.account_id, chat_id=chat_id)
             return
         with self.db.session() as session:
             state = session.get(PSState, self.account_id)
@@ -202,7 +202,7 @@ class PSScheduler:
                 state.last_sent_at = utcnow()
                 state.next_send_at = utcnow() + timedelta(seconds=PS_INTERVAL_SECONDS)
                 state.last_error = None
-        self.audit.write("INFO", "ps", "sent", f"PS message sent (Telegram message {message_id})", account_id=self.account_id, chat_id=chat_id, message_id=message_id)
+        self.audit.write("INFO", "ps", "sent", f"Повідомлення PS відправлено (повідомлення Telegram {message_id})", account_id=self.account_id, chat_id=chat_id, message_id=message_id)
 
     async def shutdown(self) -> None:
         self._shutting_down = True

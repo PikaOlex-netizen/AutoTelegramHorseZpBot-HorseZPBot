@@ -1,11 +1,11 @@
-# Manual Telegram integration checklist
+# Контрольний список ручної інтеграції Telegram
 
-The automated tests deliberately do not contact Telegram: no test account, phone code, QR token or 2FA password is ever faked or stored. Run this checklist with a dedicated account and real groups before production use.
+Автоматизовані тести навмисно не контактують з Telegram: жоден тестовий акаунт, телефонний код, QR токен або пароль 2FA ніколи не підробляється або не зберігається. Запустіть цей контрольний список з присвяченим акаунтом та реальними групами перед виробничим використанням.
 
-1. Configure `API_ID` / `API_HASH`, start the application, and complete Phone Login. Repeat using a real QR token and an account with 2FA if applicable.
-2. Restart the app and verify that the existing session reconnects without a new code.
-3. Add groups manually by Chat ID, select each for PЧ, ПБ, or both, then remove one and confirm it disappears from the working list while message history remains.
-4. Assign at least 7 ПЧ and 13 ПБ groups. Temporarily set `GROUP_DELAY_SECONDS=5` and `DELETE_AFTER_SECONDS=10` in Settings. Verify each mailing advances independently and its group sizes differ by at most one. Verify Logs record cycle completion and the repeat-protection wait; restore the normal one-hour group delay for production.
-5. Send a short test message. Check the Messages page records the Telegram message id; let the delete worker check and remove it. Manually delete another sent message first and verify `ALREADY_DELETED`.
-6. While a scheduler is waiting, stop and relaunch the app. Verify current group/next time are restored, completed targets are not sent twice, and pending delete tasks continue.
-7. Inspect Logs for a non-sensitive event trail, and terminate with Ctrl-C to confirm graceful shutdown.
+1. Налаштуйте `API_ID` / `API_HASH`, запустіть застосунок та завершіть Phone Login. Повторіть використовуючи реальний QR токен та акаунт з 2FA, якщо застосовно.
+2. Перезапустіть застосунок та перевірте, що існуюча сесія перепідключається без нового коду.
+3. Додайте групи вручну за Chat ID, виберіть кожну для ПЧ, ПБ або обох, потім видаліть одну та підтвердіть, що вона зникає з робочого списку, а історія повідомлень залишається.
+4. Призначте щонайменше 7 груп ПЧ та 13 груп ПБ. Тимчасово встановіть `GROUP_DELAY_SECONDS=5` та `DELETE_AFTER_SECONDS=10` в Settings. Перевірте, що кожна розсилка просувається незалежно та розміри її груп відрізняються не більше ніж на одиницю. Перевірте, що Logs записують завершення циклу та очікування захисту від повторів; відновіть нормальну годинну затримку груп для виробництва.
+5. Надішліть коротке тестове повідомлення. Перевірте, що сторінка Messages записує id повідомлення Telegram; дозвольте виконавцю видалення перевірити та видалити його. Вручну видаліть інше надіслане повідомлення спочатку та перевірте `ALREADY_DELETED`.
+6. Поки планувальник очікує, зупиніть та перезапустіть застосунок. Перевірте, що поточна група/наступний час відновлюються, завершені цілі не відправляються двічі, а очікуючі задачі видалення продовжуються.
+7. Перевірте Logs на предмет нечутливого сліду подій та завершіть з Ctrl-C, щоб підтвердити коректне завершення.
